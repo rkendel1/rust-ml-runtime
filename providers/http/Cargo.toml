@@ -1,0 +1,13 @@
+[package]
+name = "ml-runtime-http-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ml-runtime-common = { path = "../../crates/common" }
+ml-runtime-inference = { path = "../../crates/inference" }
+ml-runtime-provider = { path = "../../crates/provider" }
+tokio-stream.workspace = true
+serde.workspace = true

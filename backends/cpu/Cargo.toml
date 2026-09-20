@@ -1,0 +1,18 @@
+[package]
+name = "ml-runtime-cpu-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ml-runtime-backend = { path = "../../crates/backend" }
+ml-runtime-common = { path = "../../crates/common" }
+ml-runtime-inference = { path = "../../crates/inference" }
+ml-runtime-model = { path = "../../crates/model" }
+futures-util.workspace = true
+serde.workspace = true
+tokio-stream.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
