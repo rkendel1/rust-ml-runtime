@@ -20,8 +20,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "ml-runtime")]
-#[command(about = "Diagnostics for the Rust-native ML runtime scaffold")]
+#[command(name = "ml-runtime", version, about = "Rust-native ML runtime")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -48,6 +47,12 @@ enum Commands {
     Providers,
     Backends,
     Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
+    Doctor {
+        #[arg(long, default_value = "examples/models")]
+        models: String,
         #[arg(long)]
         json: bool,
     },
@@ -302,6 +307,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Capabilities { json } => {
             let runtime = build_runtime(None, None, false, false, None);
             render_capabilities(&runtime.capabilities(), json)?;
+        }
+        Commands::Doctor { models, json } => {
+            let runtime = build_runtime(None, None, false, false, None);
+            let capabilities = runtime.capabilities();
+            let catalog_exists = std::path::Path::new(&models).is_dir();
+            let cpu_available = capabilities
+                .backends
+                .iter()
+                .any(|backend| backend.name == "cpu" && backend.available);
+            let checks = vec![
+                ("executable", true, "ml-runtime is running"),
+                ("configuration", true, "default configuration is valid"),
+                (
+                    "CPU backend",
+                    cpu_available,
+                    if cpu_available {
+                        "available"
+                    } else {
+                        "not available on this platform"
+                    },
+                ),
+                (
+                    "model catalog",
+                    catalog_exists,
+                    if catalog_exists {
+                        "catalog directory found"
+                    } else {
+                        "catalog directory not found (create it to install models)"
+                    },
+                ),
+            ];
+            let healthy = checks.iter().all(|(_, ok, _)| *ok);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "runtime_version": env!("CARGO_PKG_VERSION"),
+                        "checks": checks.iter().map(|(name, ok, message)| json!({
+                            "name": name,
+                            "ok": ok,
+                            "message": message,
+                        })).collect::<Vec<_>>(),
+                        "optional_backends": capabilities.backends,
+                        "healthy": healthy,
+                    }))?
+                );
+            } else {
+                println!("ml-runtime {}", env!("CARGO_PKG_VERSION"));
+                for (name, ok, message) in &checks {
+                    println!("  {} {}: {}", if *ok { "✓" } else { "-" }, name, message);
+                }
+                println!("Optional backends");
+                for backend in capabilities.backends {
+                    if backend.name != "cpu" {
+                        println!(
+                            "  {} {}: {}",
+                            if backend.available { "✓" } else { "-" },
+                            backend.name,
+                            if backend.available {
+                                "available"
+                            } else {
+                                backend.notes.join("; ")
+                            }
+                        );
+                    }
+                }
+            }
+            if !healthy {
+                return Err("doctor found installation problems".into());
+            }
         }
         Commands::Inspect {
             model,
