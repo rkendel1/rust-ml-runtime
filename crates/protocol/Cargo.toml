@@ -1,0 +1,10 @@
+[package]
+name = "ml-runtime-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ml-runtime-inference = { path = "../inference" }
+ml-runtime-model = { path = "../model" }
+serde.workspace = true
