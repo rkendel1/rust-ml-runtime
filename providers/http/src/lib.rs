@@ -1,9 +1,14 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
+use ml_runtime_inference::InferenceStreamEvent;
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
-use ml_runtime_protocol::{CapabilitiesResponse, InferRequest, InferResponse, ModelInfo};
+use ml_runtime_protocol::{
+    CapabilitiesResponse, InferRequest, InferResponse, ModelInfo, StreamInferResponse,
+};
 use ml_runtime_provider::{Provider, ProviderCapabilities, ProviderCapability};
-use tokio_stream::iter;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone, Debug)]
 pub struct HttpProvider {
@@ -60,7 +65,7 @@ impl Provider for HttpProvider {
             available: true,
             local: false,
             remote: true,
-            streaming: false,
+            streaming: true,
             cancellation: true,
             structured_output: true,
             batching: true,
@@ -112,12 +117,112 @@ impl Provider for HttpProvider {
         request: InferenceRequest,
         cancellation: Option<CancellationToken>,
     ) -> RuntimeResult<BoxStream<RuntimeResult<InferenceChunk>>> {
-        let result = self.infer(request, cancellation).await?;
-        Ok(Box::pin(iter(vec![Ok(InferenceChunk {
-            output: result.output,
-            done: true,
-            metadata: Some(result.metadata),
-        })])))
+        let response = self
+            .client
+            .post(format!("{}/v1/infer/stream", self.endpoint))
+            .json(&InferRequest { request })
+            .send()
+            .await
+            .map_err(|error| RuntimeError::transport(self.name(), error.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body: StreamInferResponse = response
+                .json()
+                .await
+                .map_err(|error| RuntimeError::transport(self.name(), error.to_string()))?;
+            return Err(map_error(
+                status,
+                body.error.unwrap_or(ml_runtime_protocol::ErrorEnvelope {
+                    code: "internal_error".to_owned(),
+                    message: "invalid server response".to_owned(),
+                    retryable: false,
+                }),
+            ));
+        }
+        let (sender, receiver) = mpsc::channel(32);
+        let provider = self.name().to_owned();
+        let token = cancellation;
+        tokio::spawn(async move {
+            let mut pending = String::new();
+            let mut last_output = None;
+            let mut bytes = response.bytes_stream();
+            while let Some(chunk) = tokio::select! {
+                chunk = bytes.next() => chunk,
+                _ = async {
+                    if let Some(token) = &token { token.cancelled().await; }
+                }, if token.is_some() => {
+                    let _ = sender.send(Err(RuntimeError::Cancelled)).await;
+                    return;
+                }
+            } {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Err(RuntimeError::transport(&provider, error.to_string())))
+                            .await;
+                        return;
+                    }
+                };
+                pending.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(index) = pending.find('\n') {
+                    let line = pending.drain(..=index).collect::<String>();
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let message: StreamInferResponse = match serde_json::from_str(line) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            let _ = sender
+                                .send(Err(RuntimeError::transport(&provider, error.to_string())))
+                                .await;
+                            return;
+                        }
+                    };
+                    let item = match (message.event, message.error) {
+                        (Some(InferenceStreamEvent::Output(output)), _) => {
+                            let previous = last_output.replace(output);
+                            previous.map(|output| {
+                                Ok(InferenceChunk {
+                                    output,
+                                    done: false,
+                                    metadata: None,
+                                })
+                            })
+                        }
+                        (Some(InferenceStreamEvent::Started(_)), _) => None,
+                        (Some(InferenceStreamEvent::Completed(metadata)), _) => {
+                            last_output.take().map(|output| {
+                                Ok(InferenceChunk {
+                                    output,
+                                    done: true,
+                                    metadata: Some(metadata),
+                                })
+                            })
+                        }
+                        (None, Some(error)) => Some(Err(map_error(reqwest::StatusCode::OK, error))),
+                        (None, None) => Some(Err(RuntimeError::transport(
+                            &provider,
+                            "empty stream event",
+                        ))),
+                    };
+                    match item {
+                        Some(Ok(item)) => {
+                            if sender.send(Ok(item)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Some(Err(error)) => {
+                            let _ = sender.send(Err(error)).await;
+                            return;
+                        }
+                        None => {}
+                    }
+                }
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(receiver)))
     }
 }
 

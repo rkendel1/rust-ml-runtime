@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use ml_runtime::ml_runtime_inference::{
-    ExecutionPolicy, InferenceOptions, InferenceRequest, Input, Output,
+    ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime::ml_runtime_model::{
     ModelFormat, ModelLocation, ModelPackage, ModelReference, ModelSpec,
@@ -68,6 +68,8 @@ struct RunArgs {
     endpoint: Option<String>,
     #[arg(long)]
     execution: Option<String>,
+    #[arg(long)]
+    stream: bool,
 }
 
 #[derive(Args)]
@@ -207,6 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input,
                 options: InferenceOptions {
                     require_remote: args.require_remote,
+                    stream: args.stream,
                     execution: parse_execution_policy(
                         args.execution.as_deref().unwrap_or(if remote {
                             "remote-only"
@@ -217,30 +220,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..InferenceOptions::default()
                 },
             };
-            let result = runtime.infer(request).await?;
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                match result.output {
-                    Output::Text(text) => println!("{text}"),
-                    other => println!("{}", serde_json::to_string_pretty(&other)?),
-                }
-
-                fn parse_execution_policy(value: &str) -> Result<ExecutionPolicy, String> {
-                    match value {
-                        "local-only" => Ok(ExecutionPolicy::LocalOnly),
-                        "remote-only" => Ok(ExecutionPolicy::RemoteOnly),
-                        "prefer-local" => Ok(ExecutionPolicy::PreferLocal),
-                        "prefer-remote" => Ok(ExecutionPolicy::PreferRemote),
-                        "local-then-remote" => Ok(ExecutionPolicy::LocalThenRemote),
-                        "remote-then-local" => Ok(ExecutionPolicy::RemoteThenLocal),
-                        _ => Err(format!("unsupported execution policy: {value}")),
+            if args.stream {
+                let mut stream = runtime.infer_stream(request).await?;
+                while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
+                    let event = event?;
+                    if args.json {
+                        println!("{}", serde_json::to_string(&event)?);
+                    } else {
+                        match event {
+                            InferenceStreamEvent::Started(_) => {}
+                            InferenceStreamEvent::Output(Output::Text(text)) => println!("{text}"),
+                            InferenceStreamEvent::Output(output) => {
+                                println!("{}", serde_json::to_string(&output)?)
+                            }
+                            InferenceStreamEvent::Completed(_) => {}
+                        }
                     }
                 }
-                println!(
-                    "provider={} backend={} hardware={:?}",
-                    result.metadata.provider, result.metadata.backend, result.metadata.hardware
-                );
+            } else {
+                let result = runtime.infer(request).await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    match result.output {
+                        Output::Text(text) => println!("{text}"),
+                        other => println!("{}", serde_json::to_string_pretty(&other)?),
+                    }
+
+                    fn parse_execution_policy(value: &str) -> Result<ExecutionPolicy, String> {
+                        match value {
+                            "local-only" => Ok(ExecutionPolicy::LocalOnly),
+                            "remote-only" => Ok(ExecutionPolicy::RemoteOnly),
+                            "prefer-local" => Ok(ExecutionPolicy::PreferLocal),
+                            "prefer-remote" => Ok(ExecutionPolicy::PreferRemote),
+                            "local-then-remote" => Ok(ExecutionPolicy::LocalThenRemote),
+                            "remote-then-local" => Ok(ExecutionPolicy::RemoteThenLocal),
+                            _ => Err(format!("unsupported execution policy: {value}")),
+                        }
+                    }
+                    println!(
+                        "provider={} backend={} hardware={:?}",
+                        result.metadata.provider, result.metadata.backend, result.metadata.hardware
+                    );
+                }
             }
         }
         Commands::Serve(args) => {

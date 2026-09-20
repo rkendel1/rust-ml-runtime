@@ -2,7 +2,7 @@
 
 The runtime is intentionally boring at the center:
 
-`load -> select -> execute -> return -> observe`
+`load -> select -> execute -> return (or stream) -> observe`
 
 ## Primary invariant
 
@@ -57,6 +57,26 @@ execution`; cache state is not authoritative application state.
 that do not advertise batching continue to receive individual requests.
 `Runtime::status` and the `ml-runtime status` command expose generic resource
 state without exposing backend-private objects.
+
+## Streaming
+
+Streaming is a Rust-owned execution primitive. The execution order remains
+`routing -> lifecycle -> scheduling -> batching -> backend/provider`, after
+which the runtime normalizes output into `Started`, `Output`, and `Completed`
+events. Consumers do not see provider or backend event types.
+
+Backends advertise streaming capability truthfully. A backend without
+incremental support uses compatibility mode and emits one complete `Output`
+event, never synthetic token chunks. Runtime stream buffering is bounded by
+`RuntimeConfig::max_stream_buffer`; a slow consumer therefore applies
+backpressure rather than allowing unbounded output accumulation.
+
+Cancellation is propagated while a stream is queued, executing, or producing
+output. A canceled stream terminates with the structured cancellation error and
+does not emit successful completion. Remote streaming uses the existing
+versioned `/v1/infer/stream` protocol and preserves the same runtime-owned
+events and execution metadata. `infer_loaded_stream` reuses the loaded model
+resource and cache semantics of `infer_loaded`.
 
 Fallback is policy-controlled, deterministic, and observable. Provider,
 backend, timeout, transport, and model-availability failures may permit

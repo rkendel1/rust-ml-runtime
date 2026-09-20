@@ -1,21 +1,25 @@
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::{
     extract::State,
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use bytes::Bytes;
+use futures_util::StreamExt;
 use ml_runtime::Runtime;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
 use ml_runtime_model::ModelPackage;
 use ml_runtime_protocol::{
     CapabilitiesResponse, ErrorEnvelope, HealthResponse, InferRequest, InferResponse, ModelInfo,
+    StreamInferResponse,
 };
 use ml_runtime_provider::{Provider, ProviderCapabilities, ProviderCapability};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, path::Path, sync::Arc};
 use tokio_stream::iter;
 
 #[derive(Clone, Debug)]
@@ -129,6 +133,7 @@ pub async fn serve(
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/models", get(model_list))
         .route("/v1/infer", post(infer))
+        .route("/v1/infer/stream", post(infer_stream))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .with_state(ServerState {
             runtime: Arc::new(runtime),
@@ -147,6 +152,10 @@ async fn health() -> Json<HealthResponse> {
 
 async fn capabilities(State(state): State<ServerState>) -> Json<CapabilitiesResponse> {
     let capabilities = state.runtime.capabilities();
+    let streaming = capabilities
+        .backends
+        .iter()
+        .any(|backend| backend.streaming);
     let mut formats = capabilities
         .backends
         .iter()
@@ -170,9 +179,53 @@ async fn capabilities(State(state): State<ServerState>) -> Json<CapabilitiesResp
             .map(|b| b.name)
             .collect(),
         supported_tensor_types: vec!["f32".to_owned()],
-        streaming: false,
+        streaming,
         metadata: BTreeMap::new(),
     })
+}
+
+async fn infer_stream(
+    State(state): State<ServerState>,
+    Json(payload): Json<InferRequest>,
+) -> Response {
+    let valid_reference = matches!(
+        &payload.request.model,
+        ml_runtime_model::ModelReference::Id { id, .. }
+            if !id.is_empty() && !id.contains('/') && !id.contains('\\') && !id.contains("..")
+    );
+    if !valid_reference {
+        let error = ErrorEnvelope {
+            code: "invalid_request".to_owned(),
+            message: "remote streaming requires a valid model id and version".to_owned(),
+            retryable: false,
+        };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(StreamInferResponse::error(error)),
+        )
+            .into_response();
+    }
+    let stream = match state.runtime.infer_stream(payload.request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            let envelope = error_envelope(&error);
+            return (
+                status_for(&envelope.code),
+                Json(StreamInferResponse::error(envelope)),
+            )
+                .into_response();
+        }
+    };
+    let body = stream.map(|item| {
+        let response = match item {
+            Ok(event) => StreamInferResponse::event(event),
+            Err(error) => StreamInferResponse::error(error_envelope(&error)),
+        };
+        let mut bytes = serde_json::to_vec(&response).expect("stream response serializes");
+        bytes.push(b'\n');
+        Ok::<Bytes, Infallible>(Bytes::from(bytes))
+    });
+    Body::from_stream(body).into_response()
 }
 
 async fn model_list(State(state): State<ServerState>) -> Json<Vec<ModelInfo>> {

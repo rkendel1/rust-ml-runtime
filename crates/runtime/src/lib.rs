@@ -1,8 +1,9 @@
+use futures_util::StreamExt;
 use ml_runtime_backend::{Backend, BackendCapability};
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_inference::{
     ExecutionMetadata, ExecutionPolicy, InferenceChunk, InferenceOptions, InferenceRequest,
-    InferenceResult, Input, Output,
+    InferenceResult, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime_model::{ModelFormat, ModelHandle, ModelLocation, ModelReference, ModelSpec};
 use ml_runtime_provider::{Provider, ProviderCapability};
@@ -16,7 +17,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::{
+    sync::{mpsc, Semaphore},
+    time::timeout,
+};
+use tokio_stream::wrappers::ReceiverStream;
 
 pub use ml_runtime_backend;
 pub use ml_runtime_common;
@@ -24,7 +29,7 @@ pub use ml_runtime_inference;
 pub use ml_runtime_model;
 pub use ml_runtime_provider;
 
-pub type InferenceStream = BoxStream<RuntimeResult<InferenceChunk>>;
+pub type InferenceStream = BoxStream<RuntimeResult<InferenceStreamEvent>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Platform {
@@ -97,6 +102,7 @@ pub struct RuntimeConfig {
     pub max_concurrent_model_loads: usize,
     pub max_models: usize,
     pub max_memory_bytes: Option<u64>,
+    pub max_stream_buffer: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -113,6 +119,7 @@ impl Default for RuntimeConfig {
             max_concurrent_model_loads: 1,
             max_models: 8,
             max_memory_bytes: None,
+            max_stream_buffer: 32,
         }
     }
 }
@@ -550,6 +557,21 @@ impl Runtime {
         .await
     }
 
+    pub async fn infer_loaded_stream(
+        &self,
+        model: &RuntimeModelHandle,
+        input: Input,
+        mut options: InferenceOptions,
+    ) -> RuntimeResult<InferenceStream> {
+        options.stream = true;
+        self.infer_stream(InferenceRequest {
+            model: ModelReference::id(model.id().to_owned(), model.version().map(str::to_owned)),
+            input,
+            options,
+        })
+        .await
+    }
+
     pub async fn infer_batch(
         &self,
         requests: Vec<InferenceRequest>,
@@ -802,6 +824,12 @@ impl Runtime {
             });
         }
         let selection = self.select_for_request(&request)?;
+        let buffer = self.config.max_stream_buffer;
+        if buffer == 0 {
+            return Err(RuntimeError::ResourceLimit {
+                reason: "max_stream_buffer must be greater than zero".to_owned(),
+            });
+        }
         match selection.provider.as_str() {
             "local" => {
                 let loaded = self.resolve_loaded_model(&request.model).await?;
@@ -812,9 +840,30 @@ impl Runtime {
                         RuntimeError::backend_unavailable(&loaded.backend_name, "not registered")
                     })?
                     .clone();
-                backend
-                    .infer_stream(&loaded.handle, &request, Some(cancellation))
-                    .await
+                let capabilities = backend.capabilities();
+                let stream = if capabilities.streaming {
+                    backend
+                        .infer_stream(&loaded.handle, &request, Some(cancellation.clone()))
+                        .await?
+                } else {
+                    let result = backend
+                        .infer(&loaded.handle, &request, Some(cancellation.clone()))
+                        .await?;
+                    Box::pin(futures_util::stream::iter(vec![Ok(InferenceChunk {
+                        output: result.output,
+                        done: true,
+                        metadata: Some(result.metadata),
+                    })])) as BoxStream<_>
+                };
+                Ok(normalize_stream(
+                    stream,
+                    request,
+                    selection,
+                    capabilities.streaming,
+                    true,
+                    buffer,
+                    cancellation,
+                ))
             }
             provider_name => {
                 let provider = self
@@ -824,7 +873,30 @@ impl Runtime {
                         RuntimeError::provider_unavailable(provider_name, "not registered")
                     })?
                     .clone();
-                provider.infer_stream(request, Some(cancellation)).await
+                let capabilities = provider.capabilities();
+                let stream = if capabilities.streaming {
+                    provider
+                        .infer_stream(request.clone(), Some(cancellation.clone()))
+                        .await?
+                } else {
+                    let result = provider
+                        .infer(request.clone(), Some(cancellation.clone()))
+                        .await?;
+                    Box::pin(futures_util::stream::iter(vec![Ok(InferenceChunk {
+                        output: result.output,
+                        done: true,
+                        metadata: Some(result.metadata),
+                    })])) as BoxStream<_>
+                };
+                Ok(normalize_stream(
+                    stream,
+                    request,
+                    selection,
+                    capabilities.streaming,
+                    false,
+                    buffer,
+                    cancellation,
+                ))
             }
         }
     }
@@ -1200,6 +1272,90 @@ fn decorate_metadata(
     metadata.output_tokens = estimate_output_tokens(output);
 }
 
+fn normalize_stream(
+    mut source: BoxStream<RuntimeResult<InferenceChunk>>,
+    request: InferenceRequest,
+    selection: RuntimeSelection,
+    streaming_supported: bool,
+    cache_hit: bool,
+    buffer: usize,
+    cancellation: CancellationToken,
+) -> InferenceStream {
+    let (sender, receiver) = mpsc::channel(buffer);
+    tokio::spawn(async move {
+        let (model, version) = model_details(&request.model);
+        let mut metadata = ExecutionMetadata {
+            model,
+            model_version: version,
+            provider: selection.provider.clone(),
+            execution_target: selection.provider.clone(),
+            routing_policy: selection.policy.clone(),
+            fallback: selection.fallback,
+            fallback_from: selection.fallback_from.clone(),
+            fallback_reason: Some(selection.reason.clone()),
+            streaming_requested: true,
+            streaming_supported,
+            cache_hit,
+            completion_state: Some("started".to_owned()),
+            ..ExecutionMetadata::default()
+        };
+        if sender
+            .send(Ok(InferenceStreamEvent::Started(metadata.clone())))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let mut output_count = 0;
+        while let Some(item) = tokio::select! {
+            item = source.next() => item,
+            _ = cancellation.cancelled() => {
+                let _ = sender.send(Err(RuntimeError::Cancelled)).await;
+                return;
+            }
+        } {
+            match item {
+                Ok(chunk) => {
+                    if let Some(chunk_metadata) = chunk.metadata {
+                        metadata = chunk_metadata;
+                    }
+                    metadata.streaming_requested = true;
+                    metadata.streaming_supported = streaming_supported;
+                    metadata.cache_hit = cache_hit;
+                    metadata.output_event_count = output_count + 1;
+                    output_count += 1;
+                    if sender
+                        .send(Ok(InferenceStreamEvent::Output(chunk.output)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if chunk.done {
+                        metadata.output_event_count = output_count;
+                        metadata.completion_state = Some("completed".to_owned());
+                        let _ = sender
+                            .send(Ok(InferenceStreamEvent::Completed(metadata)))
+                            .await;
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error)).await;
+                    return;
+                }
+            }
+        }
+        metadata.output_event_count = output_count;
+        metadata.completion_state = Some("completed".to_owned());
+        let _ = sender
+            .send(Ok(InferenceStreamEvent::Completed(metadata)))
+            .await;
+    });
+    Box::pin(ReceiverStream::new(receiver))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1448,11 +1604,23 @@ mod tests {
             .await
             .unwrap();
 
-        let first = stream.next().await.unwrap().unwrap();
-        let second = stream.next().await.unwrap().unwrap();
-        assert_eq!(first.output, Output::Text("hello".to_owned()));
-        assert_eq!(second.output, Output::Text("runtime".to_owned()));
-        assert!(second.done);
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Started(_)
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Output(Output::Text(text)) if text == "hello"
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Output(Output::Text(text)) if text == "runtime"
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Completed(metadata)
+                if metadata.output_event_count == 2 && metadata.streaming_supported
+        ));
     }
 
     #[tokio::test]
@@ -1495,9 +1663,19 @@ mod tests {
             .await
             .unwrap();
 
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.output, Output::Text("remote-model".to_owned()));
-        assert!(chunk.done);
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Started(_)
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Output(Output::Text(text)) if text == "remote-model"
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Completed(metadata)
+                if metadata.output_event_count == 1
+        ));
     }
 
     #[tokio::test]
@@ -1517,6 +1695,39 @@ mod tests {
             .await
             .unwrap();
         assert!(result.metadata.cache_hit);
+        assert_eq!(runtime.models().list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn loaded_stream_reuses_the_cached_model() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let handle = runtime
+            .load(ModelSpec::new(
+                "echo",
+                ModelFormat::Unknown,
+                ModelLocation::Memory,
+            ))
+            .await
+            .unwrap();
+        let mut stream = runtime
+            .infer_loaded_stream(
+                &handle,
+                Input::Text("cached stream".to_owned()),
+                InferenceOptions::default(),
+            )
+            .await
+            .unwrap();
+        let events = futures_util::StreamExt::collect::<Vec<_>>(&mut stream).await;
+        assert!(matches!(
+            events.first().and_then(|event| event.as_ref().ok()),
+            Some(InferenceStreamEvent::Started(_))
+        ));
+        assert!(matches!(
+            events.last().and_then(|event| event.as_ref().ok()),
+            Some(InferenceStreamEvent::Completed(metadata)) if metadata.cache_hit
+        ));
         assert_eq!(runtime.models().list().len(), 1);
     }
 
