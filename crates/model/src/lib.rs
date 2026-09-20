@@ -108,7 +108,7 @@ impl ModelPackage {
         if canonical_artifact.strip_prefix(&canonical_root).is_err() {
             return Err("model artifact must be inside the model package".to_owned());
         }
-        if !artifact.is_file() {
+        if !artifact.is_file() && !artifact.is_dir() {
             return Err(format!(
                 "model artifact does not exist: {}",
                 artifact.display()
