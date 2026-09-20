@@ -2,8 +2,14 @@
   "schema_version": 1,
   "id": "onnx-example",
   "model_version": "1.0.0",
-  "format": "Onnx",
+  "format": "onnx",
   "artifact": "artifacts/model.onnx",
+  "inputs": [
+    { "name": "input", "data_type": "float32", "shape": [1, 2] }
+  ],
+  "outputs": [
+    { "name": "output", "data_type": "float32", "shape": [1, 2] }
+  ],
   "metadata": {
     "description": "Deterministic ONNX Runtime CPU fixture"
   }

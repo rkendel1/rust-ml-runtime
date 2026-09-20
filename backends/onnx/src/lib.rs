@@ -78,14 +78,18 @@ impl Backend for OnnxBackend {
         request: &InferenceRequest,
         cancellation: Option<CancellationToken>,
     ) -> RuntimeResult<InferenceResult> {
-        if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        if cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
             return Err(RuntimeError::Cancelled);
         }
-        let loaded = model
-            .state::<OnnxLoadedModel>()
-            .ok_or_else(|| RuntimeError::InvalidInput {
-                reason: "model handle does not belong to the ONNX backend".to_owned(),
-            })?;
+        let loaded =
+            model
+                .state::<OnnxLoadedModel>()
+                .ok_or_else(|| RuntimeError::InvalidInput {
+                    reason: "model handle does not belong to the ONNX backend".to_owned(),
+                })?;
         let Input::Tensor(input) = &request.input else {
             return Err(RuntimeError::InvalidInput {
                 reason: "ONNX backend currently accepts tensor input".to_owned(),
@@ -105,17 +109,23 @@ impl Backend for OnnxBackend {
             .first()
             .map(|input| input.name().to_owned())
             .ok_or_else(|| RuntimeError::execution("infer", "ONNX model has no inputs"))?;
-        let tensor = OrtTensor::from_array((input.shape.clone(), input.values.clone()))
-            .map_err(|error| RuntimeError::execution("infer", format!("create ONNX input: {error}")))?;
+        let tensor = OrtTensor::from_array((input.shape.clone(), input.values.clone())).map_err(
+            |error| RuntimeError::execution("infer", format!("create ONNX input: {error}")),
+        )?;
         let outputs = session
             .run(ort::inputs![input_name => tensor])
-            .map_err(|error| RuntimeError::execution("infer", format!("execute ONNX model: {error}")))?;
+            .map_err(|error| {
+                RuntimeError::execution("infer", format!("execute ONNX model: {error}"))
+            })?;
         if outputs.len() == 0 {
-            return Err(RuntimeError::execution("infer", "ONNX model produced no outputs"));
+            return Err(RuntimeError::execution(
+                "infer",
+                "ONNX model produced no outputs",
+            ));
         }
-        let (_, values) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| RuntimeError::execution("infer", format!("read ONNX output: {error}")))?;
+        let (_, values) = outputs[0].try_extract_tensor::<f32>().map_err(|error| {
+            RuntimeError::execution("infer", format!("read ONNX output: {error}"))
+        })?;
         let shape = outputs[0]
             .shape()
             .iter()
