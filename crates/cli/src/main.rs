@@ -7,7 +7,7 @@ use ml_runtime::ml_runtime_model::{
     ModelFetchRequest, ModelFormat, ModelId, ModelInstaller, ModelLocation, ModelPackage,
     ModelReference, ModelSourceReference, ModelSpec,
 };
-use ml_runtime::{Runtime, RuntimeCapabilities};
+use ml_runtime::{Runtime, RuntimeCapabilities, VERSION};
 use ml_runtime_coreml_backend::CoreMlBackend;
 use ml_runtime_cpu_backend::CpuBackend;
 use ml_runtime_cuda_backend::CudaBackend;
@@ -343,7 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "runtime_version": env!("CARGO_PKG_VERSION"),
+                        "runtime_version": VERSION,
                         "checks": checks.iter().map(|(name, ok, message)| json!({
                             "name": name,
                             "ok": ok,
@@ -354,7 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }))?
                 );
             } else {
-                println!("ml-runtime {}", env!("CARGO_PKG_VERSION"));
+                println!("ml-runtime {}", VERSION);
                 for (name, ok, message) in &checks {
                     println!("  {} {}: {}", if *ok { "✓" } else { "-" }, name, message);
                 }

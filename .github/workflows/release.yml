@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            platform: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            platform: macos-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            platform: macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - run: cargo build --release --target ${{ matrix.target }} -p ml-runtime-cli
+      - name: Package and smoke test
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          test "$version" = "$expected"
+          dir="ml-runtime-v${version}-${PLATFORM}"
+          mkdir "$dir"
+          cp "target/${TARGET}/release/ml-runtime" "$dir/"
+          cp LICENSE README.md "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+          "./${dir}/ml-runtime" --version
+          "./${dir}/ml-runtime" doctor --models .
+          "./${dir}/ml-runtime" run examples/models/linear --tensor 1,2 --shape 2
+          sha256sum "${dir}.tar.gz" > "${dir}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            ml-runtime-*.tar.gz
+            ml-runtime-*.sha256
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Checksums
+        working-directory: artifacts
+        run: find . -name '*.sha256' -exec cat {} \; > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/SHA256SUMS
