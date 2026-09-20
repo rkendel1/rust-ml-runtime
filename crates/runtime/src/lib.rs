@@ -89,7 +89,7 @@ pub enum ExecutionCompletion {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionRecord {
     pub execution_id: ExecutionId,
     pub request_id: RequestId,
@@ -592,46 +592,46 @@ impl Runtime {
     }
 
     pub fn metrics(&self) -> RuntimeMetricsSnapshot {
-            self.metrics.snapshot()
+        self.metrics.snapshot()
     }
 
-        pub fn executions(&self) -> Vec<ExecutionRecord> {
-            self.execution_records
-                .lock()
-                .expect("execution records poisoned")
-                .iter()
-                .cloned()
-                .collect()
+    pub fn executions(&self) -> Vec<ExecutionRecord> {
+        self.execution_records
+            .lock()
+            .expect("execution records poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn resources(&self) -> Vec<ModelResource> {
-            self.loaded_models
-                .read()
-                .expect("loaded model registry poisoned")
-                .values()
-                .map(|model| ModelResource {
-                    id: model.spec.id.clone(),
-                    version: model.spec.version.clone(),
-                    target: format!("{}/{}", model.provider_name, model.backend_name),
-                    state: ModelLifecycleState::Ready,
-                    memory_bytes: model.memory_bytes,
-                    last_used: model.last_used,
-                })
-                .collect()
+        self.loaded_models
+            .read()
+            .expect("loaded model registry poisoned")
+            .values()
+            .map(|model| ModelResource {
+                id: model.spec.id.clone(),
+                version: model.spec.version.clone(),
+                target: format!("{}/{}", model.provider_name, model.backend_name),
+                state: ModelLifecycleState::Ready,
+                memory_bytes: model.memory_bytes,
+                last_used: model.last_used,
+            })
+            .collect()
     }
 
     pub fn snapshot(&self) -> RuntimeSnapshot {
-            let resources = self.resources();
-            let metrics = self.metrics();
-            RuntimeSnapshot {
-                active_inferences: metrics.active_inferences,
-                active_model_loads: metrics.active_model_loads,
-                queued_inferences: (metrics.queued_requests as usize)
-                    .saturating_sub(metrics.active_inferences),
-                loaded_models: resources.len(),
-                cache_entries: resources.len(),
-                cache_memory_bytes: resources.iter().map(|resource| resource.memory_bytes).sum(),
-                metrics,
+        let resources = self.resources();
+        let metrics = self.metrics();
+        RuntimeSnapshot {
+            active_inferences: metrics.active_inferences,
+            active_model_loads: metrics.active_model_loads,
+            queued_inferences: (metrics.queued_requests as usize)
+                .saturating_sub(metrics.active_inferences),
+            loaded_models: resources.len(),
+            cache_entries: resources.len(),
+            cache_memory_bytes: resources.iter().map(|resource| resource.memory_bytes).sum(),
+            metrics,
         }
     }
 
@@ -686,7 +686,9 @@ impl Runtime {
             return Ok(runtime_handle(existing));
         }
         self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
-        self.metrics.active_model_loads.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .active_model_loads
+            .fetch_add(1, Ordering::Relaxed);
         let _permit = self
             .load_semaphore
             .acquire()
@@ -708,11 +710,15 @@ impl Runtime {
             .clone();
         let timeout_ms = self.config.timeout_ms;
         let loaded = run_with_timeout(timeout_ms, "load", backend.load(&model)).await;
-        self.metrics.active_model_loads.fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .active_model_loads
+            .fetch_sub(1, Ordering::Relaxed);
         let handle = match loaded {
             Ok(handle) => handle,
             Err(error) => {
-                self.metrics.model_load_failures.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .model_load_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(error);
             }
         };
@@ -835,10 +841,24 @@ impl Runtime {
             )
             .await;
         }
+        let batch_size = requests.len();
+        self.metrics
+            .total_requests
+            .fetch_add(batch_size as u64, Ordering::Relaxed);
+        self.metrics
+            .batch_executions
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .total_requests_batched
+            .fetch_add(batch_size as u64, Ordering::Relaxed);
+        self.metrics
+            .batch_sizes
+            .lock()
+            .expect("metrics poisoned")
+            .push(batch_size);
         let _permit = self.inference_semaphore.acquire().await.map_err(|_| {
             RuntimeError::execution("infer_batch", "runtime inference semaphore closed")
         })?;
-        let batch_size = requests.len();
         let mut results = run_with_timeout(
             self.config.timeout_ms,
             "infer_batch",
@@ -874,6 +894,9 @@ impl Runtime {
             result.metadata.batch_size = batch_size;
             result.metadata.cache_hit = true;
         }
+        self.metrics
+            .successful_requests
+            .fetch_add(results.len() as u64, Ordering::Relaxed);
         Ok(results)
     }
 
@@ -883,22 +906,38 @@ impl Runtime {
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceResult> {
         let started = Instant::now();
-        let request_id = format!("request-{}", self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1);
+        let request_id = format!(
+            "request-{}",
+            self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1
+        );
         self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.metrics.active_inferences.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .active_inferences
+            .fetch_add(1, Ordering::Relaxed);
         let model = model_details(&request.model);
         let result = self.infer_inner(request.clone(), cancellation).await;
-        self.metrics.active_inferences.fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .active_inferences
+            .fetch_sub(1, Ordering::Relaxed);
         match result {
             Ok(mut result) => {
                 result.metadata.request_id = Some(request_id.clone());
-                self.record_execution(&request_id, started.elapsed(), &result.metadata, ExecutionCompletion::Succeeded);
-                self.metrics.successful_requests.fetch_add(1, Ordering::Relaxed);
+                self.record_execution(
+                    &request_id,
+                    started.elapsed(),
+                    &result.metadata,
+                    ExecutionCompletion::Succeeded,
+                );
+                self.metrics
+                    .successful_requests
+                    .fetch_add(1, Ordering::Relaxed);
                 Ok(result)
             }
             Err(error) => {
                 let completion = if matches!(error, RuntimeError::Cancelled) {
-                    self.metrics.cancelled_requests.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .cancelled_requests
+                        .fetch_add(1, Ordering::Relaxed);
                     ExecutionCompletion::Cancelled
                 } else {
                     self.metrics.failed_requests.fetch_add(1, Ordering::Relaxed);
@@ -941,6 +980,7 @@ impl Runtime {
         match selection.provider.as_str() {
             "local" => {
                 let cache_hit = self.is_loaded(&request.model);
+                let model_load_started = Instant::now();
                 if cache_hit {
                     self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -1003,6 +1043,13 @@ impl Runtime {
                     }
                     Err(error) => return Err(error),
                 };
+                result.metadata.model_load_ms = Some(
+                    if cache_hit {
+                        0.0
+                    } else {
+                        model_load_started.elapsed().as_secs_f64() * 1000.0
+                    },
+                );
                 let capabilities = backend.capabilities();
                 let output = result.output.clone();
                 decorate_metadata(
@@ -1037,24 +1084,54 @@ impl Runtime {
         metadata: &ExecutionMetadata,
         completion: ExecutionCompletion,
     ) {
-        let execution_id = format!("execution-{}", self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1);
-        let execution_duration = Duration::from_secs_f64(metadata.execution_ms.unwrap_or(0.0) / 1000.0);
-        let queued_duration = Duration::from_secs_f64(metadata.queue_wait_ms.unwrap_or(0.0) / 1000.0);
-        let model_load_duration = Duration::from_secs_f64(metadata.model_load_ms.unwrap_or(0.0) / 1000.0);
-        self.metrics.queue_wait_micros.lock().expect("metrics poisoned").push(queued_duration.as_micros() as u64);
-        self.metrics.model_load_micros.lock().expect("metrics poisoned").push(model_load_duration.as_micros() as u64);
-        self.metrics.execution_micros.lock().expect("metrics poisoned").push(execution_duration.as_micros() as u64);
-        self.metrics.total_duration_micros.lock().expect("metrics poisoned").push(total_duration.as_micros() as u64);
+        let execution_id = format!(
+            "execution-{}",
+            self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let execution_duration =
+            Duration::from_secs_f64(metadata.execution_ms.unwrap_or(0.0) / 1000.0);
+        let queued_duration =
+            Duration::from_secs_f64(metadata.queue_wait_ms.unwrap_or(0.0) / 1000.0);
+        let model_load_duration =
+            Duration::from_secs_f64(metadata.model_load_ms.unwrap_or(0.0) / 1000.0);
+        self.metrics
+            .queue_wait_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(queued_duration.as_micros() as u64);
+        self.metrics
+            .model_load_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(model_load_duration.as_micros() as u64);
+        self.metrics
+            .execution_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(execution_duration.as_micros() as u64);
+        self.metrics
+            .total_duration_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(total_duration.as_micros() as u64);
         if metadata.provider == "local" {
-            self.metrics.local_executions.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .local_executions
+                .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.metrics.remote_executions.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .remote_executions
+                .fetch_add(1, Ordering::Relaxed);
         }
         if metadata.fallback {
-            self.metrics.fallback_executions.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .fallback_executions
+                .fetch_add(1, Ordering::Relaxed);
         }
         if metadata.streaming_requested {
-            self.metrics.streaming_requests.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .streaming_requests
+                .fetch_add(1, Ordering::Relaxed);
         }
         let record = ExecutionRecord {
             execution_id,
@@ -1076,7 +1153,10 @@ impl Runtime {
             output_event_count: metadata.output_event_count,
             completion,
         };
-        let mut records = self.execution_records.lock().expect("execution records poisoned");
+        let mut records = self
+            .execution_records
+            .lock()
+            .expect("execution records poisoned");
         records.push_back(record);
         while records.len() > 256 {
             records.pop_front();
@@ -1136,6 +1216,10 @@ impl Runtime {
         request: InferenceRequest,
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceStream> {
+        self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .streaming_requests
+            .fetch_add(1, Ordering::Relaxed);
         self.validate_request(&request)?;
         if !request.options.stream {
             return Err(RuntimeError::CapabilityMismatch {
@@ -1165,6 +1249,9 @@ impl Runtime {
                         .infer_stream(&loaded.handle, &request, Some(cancellation.clone()))
                         .await?
                 } else {
+                    self.metrics
+                        .compatibility_streams
+                        .fetch_add(1, Ordering::Relaxed);
                     let result = backend
                         .infer(&loaded.handle, &request, Some(cancellation.clone()))
                         .await?;
@@ -1182,6 +1269,7 @@ impl Runtime {
                     true,
                     buffer,
                     cancellation,
+                    self.metrics.clone(),
                 ))
             }
             provider_name => {
@@ -1198,6 +1286,9 @@ impl Runtime {
                         .infer_stream(request.clone(), Some(cancellation.clone()))
                         .await?
                 } else {
+                    self.metrics
+                        .compatibility_streams
+                        .fetch_add(1, Ordering::Relaxed);
                     let result = provider
                         .infer(request.clone(), Some(cancellation.clone()))
                         .await?;
@@ -1215,6 +1306,7 @@ impl Runtime {
                     false,
                     buffer,
                     cancellation,
+                    self.metrics.clone(),
                 ))
             }
         }
@@ -1562,7 +1654,9 @@ fn estimate_output_tokens(output: &Output) -> Option<u64> {
 
 fn model_memory_bytes(model: &ModelSpec) -> u64 {
     match &model.location {
-        ModelLocation::Path(path) => std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0),
+        ModelLocation::Path(path) => std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -1606,6 +1700,7 @@ fn normalize_stream(
     cache_hit: bool,
     buffer: usize,
     cancellation: CancellationToken,
+    metrics: Arc<RuntimeMetrics>,
 ) -> InferenceStream {
     let (sender, receiver) = mpsc::channel(buffer);
     tokio::spawn(async move {
@@ -1637,6 +1732,7 @@ fn normalize_stream(
         while let Some(item) = tokio::select! {
             item = source.next() => item,
             _ = cancellation.cancelled() => {
+                metrics.cancelled_streams.fetch_add(1, Ordering::Relaxed);
                 let _ = sender.send(Err(RuntimeError::Cancelled)).await;
                 return;
             }
@@ -1658,6 +1754,9 @@ fn normalize_stream(
                     {
                         return;
                     }
+                    metrics
+                        .streamed_output_events
+                        .fetch_add(1, Ordering::Relaxed);
                     if chunk.done {
                         metadata.output_event_count = output_count;
                         metadata.completion_state = Some("completed".to_owned());
@@ -2109,5 +2208,35 @@ mod tests {
         assert_eq!(results[1].output, Output::Text("b".to_owned()));
         assert_eq!(results[0].metadata.batch_size, 2);
         assert_eq!(results[1].metadata.batch_size, 2);
+    }
+
+    #[tokio::test]
+    async fn records_execution_metrics_and_snapshot() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let model = ModelSpec::new("observed", ModelFormat::Unknown, ModelLocation::Memory);
+        let result = runtime
+            .infer(InferenceRequest {
+                model: model.into(),
+                input: Input::Text("hello".to_owned()),
+                options: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        let metrics = runtime.metrics();
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.successful_requests, 1);
+        assert_eq!(runtime.executions().len(), 1);
+        assert_eq!(
+            runtime.executions()[0].completion,
+            ExecutionCompletion::Succeeded
+        );
+        assert_eq!(
+            runtime.executions()[0].request_id,
+            result.metadata.request_id.clone().unwrap()
+        );
+        assert_eq!(runtime.snapshot().loaded_models, 1);
     }
 }
