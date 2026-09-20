@@ -9,13 +9,23 @@ export interface RuntimeConfig {
   provider?: string
   preferAcceleration?: boolean
   allowRemoteFallback?: boolean
+  execution?: ExecutionPolicy
 }
+
+export type ExecutionPolicy =
+  | "local-only"
+  | "remote-only"
+  | "prefer-local"
+  | "prefer-remote"
+  | "local-then-remote"
+  | "remote-then-local"
 
 export interface InferRequest {
   model: string
   input: string
   tensor?: { shape: number[]; values: number[] }
   requireRemote?: boolean
+  execution?: ExecutionPolicy
 }
 
 async function runJson(binaryPath: string, args: string[]) {
@@ -49,6 +59,9 @@ export async function createRuntime(config: RuntimeConfig = {}) {
       if (config.preferAcceleration) args.push("--prefer-acceleration")
       if (config.allowRemoteFallback) args.push("--allow-remote-fallback")
       if (request.requireRemote) args.push("--require-remote")
+      if (request.execution ?? config.execution) {
+        args.push("--execution", request.execution ?? config.execution!)
+      }
       return runJson(binaryPath, args)
     }
   }

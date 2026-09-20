@@ -3,6 +3,17 @@ use ml_runtime_model::ModelReference;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionPolicy {
+    #[default]
+    LocalOnly,
+    RemoteOnly,
+    PreferLocal,
+    PreferRemote,
+    LocalThenRemote,
+    RemoteThenLocal,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Tensor {
     pub shape: Vec<usize>,
@@ -29,6 +40,8 @@ pub struct InferenceOptions {
     pub require_local: bool,
     pub require_remote: bool,
     pub stream: bool,
+    #[serde(default)]
+    pub execution: ExecutionPolicy,
 }
 
 impl Default for InferenceOptions {
@@ -40,6 +53,7 @@ impl Default for InferenceOptions {
             require_local: false,
             require_remote: false,
             stream: false,
+            execution: ExecutionPolicy::LocalOnly,
         }
     }
 }
@@ -90,8 +104,14 @@ pub enum Output {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionMetadata {
     pub model: String,
+    pub model_version: Option<String>,
     pub provider: String,
     pub backend: String,
+    pub execution_target: String,
+    pub routing_policy: ExecutionPolicy,
+    pub fallback: bool,
+    pub fallback_from: Option<String>,
+    pub fallback_reason: Option<String>,
     pub latency_ms: Option<f64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
