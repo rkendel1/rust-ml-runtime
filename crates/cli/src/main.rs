@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use ml_runtime::ml_runtime_inference::{InferenceOptions, InferenceRequest, Input, Output};
-use ml_runtime::ml_runtime_model::{ModelFormat, ModelLocation, ModelReference, ModelSpec};
+use ml_runtime::ml_runtime_model::{
+    ModelFormat, ModelLocation, ModelPackage, ModelReference, ModelSpec,
+};
 use ml_runtime::{Runtime, RuntimeCapabilities};
 use ml_runtime_coreml_backend::CoreMlBackend;
 use ml_runtime_cpu_backend::CpuBackend;
@@ -37,6 +39,10 @@ struct RunArgs {
     model: String,
     #[arg(long, default_value = "Hello world")]
     input: String,
+    #[arg(long, value_delimiter = ',')]
+    tensor: Option<Vec<f32>>,
+    #[arg(long, value_delimiter = ',')]
+    shape: Option<Vec<usize>>,
     #[arg(long)]
     json: bool,
     #[arg(long)]
@@ -95,14 +101,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.allow_remote_fallback,
                 args.prefer_acceleration,
             );
-            let model = ModelSpec::new(
-                args.model.clone(),
-                ModelFormat::Unknown,
-                ModelLocation::Memory,
-            );
+            let model = if std::path::Path::new(&args.model).is_dir() {
+                ModelPackage::open(&args.model)
+                    .map_err(|error| format!("open model package: {error}"))?
+                    .spec()
+            } else {
+                ModelSpec::new(
+                    args.model.clone(),
+                    ModelFormat::Unknown,
+                    ModelLocation::Memory,
+                )
+            };
+            let input = match args.tensor {
+                Some(values) => Input::Tensor(ml_runtime::ml_runtime_inference::Tensor {
+                    shape: args.shape.unwrap_or_else(|| vec![values.len()]),
+                    values,
+                }),
+                None => Input::Text(args.input),
+            };
             let request = InferenceRequest {
                 model: ModelReference::Spec(model),
-                input: Input::Text(args.input),
+                input,
                 options: InferenceOptions {
                     require_remote: args.require_remote,
                     ..InferenceOptions::default()

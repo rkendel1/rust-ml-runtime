@@ -14,6 +14,7 @@ export interface RuntimeConfig {
 export interface InferRequest {
   model: string
   input: string
+  tensor?: { shape: number[]; values: number[] }
   requireRemote?: boolean
 }
 
@@ -39,6 +40,10 @@ export async function createRuntime(config: RuntimeConfig = {}) {
     },
     async infer(request: InferRequest) {
       const args = ["run", request.model, "--input", request.input, "--json"]
+      if (request.tensor) {
+        args.push("--tensor", request.tensor.values.join(","))
+        args.push("--shape", request.tensor.shape.join(","))
+      }
       if (config.backend) args.push("--backend", config.backend)
       if (config.provider) args.push("--provider", config.provider)
       if (config.preferAcceleration) args.push("--prefer-acceleration")

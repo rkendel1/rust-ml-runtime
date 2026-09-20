@@ -12,6 +12,7 @@ ml-runtime-inference = { path = "../../crates/inference" }
 ml-runtime-model = { path = "../../crates/model" }
 futures-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio-stream.workspace = true
 
 [dev-dependencies]

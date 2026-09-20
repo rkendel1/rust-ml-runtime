@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{any::Any, collections::BTreeMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub type ModelMetadata = BTreeMap<String, String>;
 
@@ -28,6 +34,90 @@ pub struct ModelSpec {
     pub format: ModelFormat,
     pub location: ModelLocation,
     pub metadata: ModelMetadata,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelManifest {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(alias = "name")]
+    pub id: String,
+    #[serde(default)]
+    pub model_version: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub format: ModelFormat,
+    #[serde(alias = "artifact_path")]
+    pub artifact: String,
+    #[serde(default)]
+    pub metadata: ModelMetadata,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPackage {
+    pub manifest: ModelManifest,
+    pub root: PathBuf,
+    pub artifact: PathBuf,
+}
+
+impl ModelPackage {
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        let root = root.as_ref().to_path_buf();
+        let manifest_path = root.join("manifest.json");
+        let manifest: ModelManifest = serde_json::from_slice(
+            &fs::read(&manifest_path)
+                .map_err(|error| format!("read {}: {error}", manifest_path.display()))?,
+        )
+        .map_err(|error| format!("parse {}: {error}", manifest_path.display()))?;
+        if manifest.schema_version != 1 {
+            return Err(format!(
+                "unsupported model manifest schema version {}",
+                manifest.schema_version
+            ));
+        }
+        let artifact = root.join(&manifest.artifact);
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|error| format!("resolve model package: {error}"))?;
+        let canonical_artifact = artifact
+            .canonicalize()
+            .map_err(|error| format!("resolve model artifact: {error}"))?;
+        if canonical_artifact
+            .strip_prefix(&canonical_root)
+            .is_err()
+        {
+            return Err("model artifact must be inside the model package".to_owned());
+        }
+        if !artifact.is_file() {
+            return Err(format!(
+                "model artifact does not exist: {}",
+                artifact.display()
+            ));
+        }
+        Ok(Self {
+            manifest,
+            root,
+            artifact,
+        })
+    }
+
+    pub fn spec(&self) -> ModelSpec {
+        ModelSpec {
+            id: self.manifest.id.clone(),
+            version: self
+                .manifest
+                .model_version
+                .clone()
+                .or_else(|| self.manifest.version.clone()),
+            format: self.manifest.format.clone(),
+            location: ModelLocation::Path(self.artifact.display().to_string()),
+            metadata: self.manifest.metadata.clone(),
+        }
+    }
 }
 
 impl ModelSpec {
