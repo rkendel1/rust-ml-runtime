@@ -752,7 +752,11 @@ impl Runtime {
             fallback,
             fallback_from: fallback.then(|| "local".to_owned()),
             reason: reason.unwrap_or_else(|| "remote execution selected by policy".to_owned()),
-            policy: options.execution.clone(),
+            policy: if fallback && options.execution == ExecutionPolicy::LocalOnly {
+                ExecutionPolicy::LocalThenRemote
+            } else {
+                options.execution.clone()
+            },
         })
     }
 
