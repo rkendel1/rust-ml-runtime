@@ -1,0 +1,24 @@
+{
+  "id": "coreml-example",
+  "model_version": "1",
+  "format": "coreml",
+  "artifact": "artifacts/model.mlmodelc",
+  "metadata": {
+    "input_name": "input",
+    "output_name": "output"
+  },
+  "inputs": [
+    {
+      "name": "input",
+      "data_type": "float32",
+      "shape": [2]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "output",
+      "data_type": "float32",
+      "shape": [2]
+    }
+  ]
+}

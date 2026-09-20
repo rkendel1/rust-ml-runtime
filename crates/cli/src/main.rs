@@ -31,6 +31,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Inspect {
+        model: String,
+        #[arg(long)]
+        json: bool,
+    },
     Run(RunArgs),
 }
 
@@ -93,6 +98,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Capabilities { json } => {
             let runtime = build_runtime(None, None, false, false);
             render_capabilities(&runtime.capabilities(), json)?;
+        }
+        Commands::Inspect { model, json } => {
+            let package = ModelPackage::open(&model)
+                .map_err(|error| format!("open model package: {error}"))?;
+            let runtime = build_runtime(None, None, false, false);
+            let selection = runtime.selection_for(&package.spec())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "model": package.manifest.id,
+                        "format": package.manifest.format,
+                        "backend": selection.backend,
+                        "execution": selection.provider,
+                        "available": selection.backend.as_ref().and_then(|name| runtime
+                            .backends()
+                            .list()
+                            .iter()
+                            .find(|backend| &backend.name == name)
+                            .map(|backend| backend.available))
+                    }))?
+                );
+            } else {
+                println!("Model: {}", package.manifest.id);
+                println!("Format: {:?}", package.manifest.format);
+                println!(
+                    "Backend: {}",
+                    selection.backend.as_deref().unwrap_or("none")
+                );
+                println!("Execution: {}", selection.provider);
+            }
         }
         Commands::Run(args) => {
             let runtime = build_runtime(
