@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 pub type ModelMetadata = BTreeMap<String, String>;
 
@@ -195,6 +196,14 @@ impl ModelPackage {
         if artifact_name.is_empty() {
             return Err("model artifact path is empty".to_owned());
         }
+        let artifact_path = Path::new(artifact_name);
+        if artifact_path.is_absolute()
+            || artifact_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err("model artifact path must stay inside the model package".to_owned());
+        }
         let artifact = root.join(artifact_name);
         let canonical_root = root
             .canonicalize()
@@ -212,11 +221,26 @@ impl ModelPackage {
                 artifact.display()
             ));
         }
+        Self::reject_symlinks(&artifact)
+            .map_err(|reason| format!("model artifact is unsafe: {reason}"))?;
         Ok(Self {
             manifest,
             root,
             artifact,
         })
+    }
+
+    fn reject_symlinks(path: &Path) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("symbolic links are not allowed".to_owned());
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+                Self::reject_symlinks(&entry.map_err(|error| error.to_string())?.path())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn spec(&self) -> ModelSpec {
@@ -525,6 +549,565 @@ impl From<ModelSpec> for ModelReference {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelFetchRequest {
+    pub model: ModelId,
+    pub source: ModelSourceReference,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelSourceReference {
+    Path(PathBuf),
+    Uri(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct AcquisitionConfig {
+    pub max_download_bytes: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for AcquisitionConfig {
+    fn default() -> Self {
+        Self {
+            max_download_bytes: 4 * 1024 * 1024 * 1024,
+            timeout_secs: 300,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelArtifact {
+    pub package_path: PathBuf,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallMode {
+    KeepExisting,
+    Replace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallResult {
+    Installed(ModelDescriptor),
+    AlreadyInstalled(ModelDescriptor),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcquisitionError {
+    Io(String),
+    InvalidRequest(String),
+    Cancelled,
+    LimitExceeded { limit: u64, actual: u64 },
+    InvalidPackage { path: PathBuf, reason: String },
+    IdentityMismatch { requested: ModelId, found: ModelId },
+    AlreadyInstalled(ModelId),
+    Catalog(CatalogError),
+}
+
+impl std::fmt::Display for AcquisitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(reason) => write!(f, "acquisition I/O error: {reason}"),
+            Self::InvalidRequest(reason) => write!(f, "invalid acquisition request: {reason}"),
+            Self::Cancelled => write!(f, "model acquisition cancelled"),
+            Self::LimitExceeded { limit, actual } => {
+                write!(f, "model acquisition exceeds {limit} bytes (got {actual})")
+            }
+            Self::InvalidPackage { path, reason } => {
+                write!(f, "invalid model package {}: {reason}", path.display())
+            }
+            Self::IdentityMismatch { requested, found } => {
+                write!(f, "requested model {requested}, package contains {found}")
+            }
+            Self::AlreadyInstalled(id) => write!(f, "model already installed: {id}"),
+            Self::Catalog(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for AcquisitionError {}
+
+#[async_trait]
+pub trait ModelSource: Send + Sync {
+    async fn fetch(
+        &self,
+        request: &ModelFetchRequest,
+        destination: &Path,
+        config: &AcquisitionConfig,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ModelArtifact, AcquisitionError>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileModelSource;
+
+impl FileModelSource {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl ModelSource for FileModelSource {
+    async fn fetch(
+        &self,
+        request: &ModelFetchRequest,
+        destination: &Path,
+        config: &AcquisitionConfig,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ModelArtifact, AcquisitionError> {
+        let source = match &request.source {
+            ModelSourceReference::Path(path) => path,
+            ModelSourceReference::Uri(_) => {
+                return Err(AcquisitionError::InvalidRequest(
+                    "file source requires a filesystem path".to_owned(),
+                ))
+            }
+        };
+        if !source.is_dir() {
+            return Err(AcquisitionError::InvalidRequest(format!(
+                "model source is not a package directory: {}",
+                source.display()
+            )));
+        }
+        copy_package(source, destination, config.max_download_bytes, cancellation)?;
+        let package =
+            ModelPackage::open(destination).map_err(|reason| AcquisitionError::InvalidPackage {
+                path: destination.to_path_buf(),
+                reason,
+            })?;
+        package
+            .validate_artifact()
+            .map_err(AcquisitionError::Catalog)?;
+        let id = package_id(&package)?;
+        if id != request.model {
+            return Err(AcquisitionError::IdentityMismatch {
+                requested: request.model.clone(),
+                found: id,
+            });
+        }
+        Ok(ModelArtifact {
+            package_path: destination.to_path_buf(),
+            bytes: artifact_size(&package.artifact).map_err(|error| match error {
+                CatalogError::Io(reason) => AcquisitionError::Io(reason),
+                other => AcquisitionError::Catalog(other),
+            })?,
+            sha256: sha256(&package.artifact).map_err(|error| match error {
+                CatalogError::Io(reason) => AcquisitionError::Io(reason),
+                other => AcquisitionError::Catalog(other),
+            })?,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HttpModelSource {
+    client: reqwest::Client,
+    allow_insecure_http: bool,
+}
+
+impl HttpModelSource {
+    pub fn new() -> Result<Self, AcquisitionError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        Ok(Self {
+            client,
+            allow_insecure_http: false,
+        })
+    }
+
+    pub fn allow_insecure_http(mut self, allow: bool) -> Self {
+        self.allow_insecure_http = allow;
+        self
+    }
+}
+
+#[async_trait]
+impl ModelSource for HttpModelSource {
+    async fn fetch(
+        &self,
+        request: &ModelFetchRequest,
+        destination: &Path,
+        config: &AcquisitionConfig,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ModelArtifact, AcquisitionError> {
+        let base = match &request.source {
+            ModelSourceReference::Uri(uri) => uri.trim_end_matches('/').to_owned(),
+            ModelSourceReference::Path(_) => {
+                return Err(AcquisitionError::InvalidRequest(
+                    "HTTP source requires a URI".to_owned(),
+                ))
+            }
+        };
+        let manifest_url = if base.ends_with("manifest.json") {
+            base
+        } else {
+            format!("{base}/manifest.json")
+        };
+        validate_http_uri(&manifest_url, self.allow_insecure_http)?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(config.timeout_secs),
+            self.client.get(&manifest_url).send(),
+        )
+        .await
+        .map_err(|_| AcquisitionError::Io("manifest request timed out".to_owned()))?
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let manifest: ModelManifest =
+            response
+                .json()
+                .await
+                .map_err(|error| AcquisitionError::InvalidPackage {
+                    path: destination.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+        let version = manifest
+            .model_version
+            .clone()
+            .or_else(|| manifest.version.clone())
+            .ok_or_else(|| AcquisitionError::InvalidPackage {
+                path: destination.to_path_buf(),
+                reason: "model version is required".to_owned(),
+            })?;
+        let found =
+            ModelId::new(manifest.id.clone(), version).map_err(AcquisitionError::Catalog)?;
+        if found != request.model {
+            return Err(AcquisitionError::IdentityMismatch {
+                requested: request.model.clone(),
+                found,
+            });
+        }
+        let artifact_path = Path::new(&manifest.artifact.path);
+        if artifact_path.is_absolute()
+            || artifact_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(AcquisitionError::InvalidPackage {
+                path: destination.to_path_buf(),
+                reason: "artifact path must stay inside the package".to_owned(),
+            });
+        }
+        let artifact_url = format!(
+            "{}/{}",
+            manifest_url
+                .trim_end_matches("manifest.json")
+                .trim_end_matches('/'),
+            manifest.artifact.path
+        );
+        validate_http_uri(&artifact_url, self.allow_insecure_http)?;
+        let response = self
+            .client
+            .get(artifact_url)
+            .send()
+            .await
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > config.max_download_bytes)
+        {
+            return Err(AcquisitionError::LimitExceeded {
+                limit: config.max_download_bytes,
+                actual: response.content_length().unwrap_or_default(),
+            });
+        }
+        fs::create_dir_all(
+            destination.join(artifact_path.parent().unwrap_or_else(|| Path::new(""))),
+        )
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        fs::write(
+            destination.join(artifact_path),
+            download_body(response, config, cancellation).await?,
+        )
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        fs::write(
+            destination.join("manifest.json"),
+            serde_json::to_vec(&manifest).map_err(|error| AcquisitionError::InvalidPackage {
+                path: destination.to_path_buf(),
+                reason: error.to_string(),
+            })?,
+        )
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let package =
+            ModelPackage::open(destination).map_err(|reason| AcquisitionError::InvalidPackage {
+                path: destination.to_path_buf(),
+                reason,
+            })?;
+        package
+            .validate_artifact()
+            .map_err(AcquisitionError::Catalog)?;
+        Ok(ModelArtifact {
+            package_path: destination.to_path_buf(),
+            bytes: artifact_size(&package.artifact)
+                .map_err(|error| AcquisitionError::Catalog(error))?,
+            sha256: sha256(&package.artifact).map_err(|error| AcquisitionError::Catalog(error))?,
+        })
+    }
+}
+
+fn validate_http_uri(uri: &str, allow_insecure_http: bool) -> Result<(), AcquisitionError> {
+    let parsed = reqwest::Url::parse(uri)
+        .map_err(|error| AcquisitionError::InvalidRequest(error.to_string()))?;
+    if parsed.scheme() != "https" && !(allow_insecure_http && parsed.scheme() == "http") {
+        return Err(AcquisitionError::InvalidRequest(
+            "model acquisition requires HTTPS".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn download_body(
+    mut response: reqwest::Response,
+    config: &AcquisitionConfig,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<u8>, AcquisitionError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?
+    {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(AcquisitionError::Cancelled);
+        }
+        if body.len() as u64 + chunk.len() as u64 > config.max_download_bytes {
+            return Err(AcquisitionError::LimitExceeded {
+                limit: config.max_download_bytes,
+                actual: body.len() as u64 + chunk.len() as u64,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[derive(Clone)]
+pub struct ModelInstaller {
+    root: PathBuf,
+    catalog: Option<Arc<dyn ModelCatalog>>,
+    config: AcquisitionConfig,
+}
+
+impl ModelInstaller {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            catalog: None,
+            config: AcquisitionConfig::default(),
+        }
+    }
+
+    pub fn with_catalog<C: ModelCatalog + 'static>(mut self, catalog: Arc<C>) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    pub fn with_config(mut self, config: AcquisitionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub async fn install<S: ModelSource>(
+        &self,
+        source: &S,
+        request: &ModelFetchRequest,
+        mode: InstallMode,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<InstallResult, AcquisitionError> {
+        request
+            .model
+            .validate()
+            .map_err(AcquisitionError::Catalog)?;
+        if let Some(catalog) = &self.catalog {
+            if let Ok(existing) = catalog
+                .resolve(&ModelReference::id(
+                    request.model.name.clone(),
+                    Some(request.model.version.clone()),
+                ))
+                .await
+            {
+                catalog
+                    .validate(&existing.id)
+                    .await
+                    .map_err(AcquisitionError::Catalog)?;
+                if mode == InstallMode::KeepExisting {
+                    return Ok(InstallResult::AlreadyInstalled(existing));
+                }
+            }
+        }
+        if let Some(token) = cancellation {
+            if token.is_cancelled() {
+                return Err(AcquisitionError::Cancelled);
+            }
+        }
+        fs::create_dir_all(&self.root).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let staging_root = self.root.join(".staging");
+        fs::create_dir_all(&staging_root)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let staging = staging_root.join(format!(
+            "{}-{}-{}",
+            request.model.name,
+            request.model.version,
+            std::process::id()
+        ));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        }
+        fs::create_dir_all(&staging).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let result = async {
+            source
+                .fetch(request, &staging, &self.config, cancellation)
+                .await?;
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(AcquisitionError::Cancelled);
+            }
+            let package = ModelPackage::open(&staging).map_err(|reason| {
+                AcquisitionError::InvalidPackage {
+                    path: staging.clone(),
+                    reason,
+                }
+            })?;
+            package
+                .validate_artifact()
+                .map_err(AcquisitionError::Catalog)?;
+            let found = package_id(&package)?;
+            if found != request.model {
+                return Err(AcquisitionError::IdentityMismatch {
+                    requested: request.model.clone(),
+                    found,
+                });
+            }
+            let final_path = self
+                .root
+                .join(&request.model.name)
+                .join(&request.model.version);
+            let parent = final_path.parent().expect("model version has a parent");
+            fs::create_dir_all(parent).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+            if final_path.exists() {
+                if mode == InstallMode::Replace {
+                    let backup = parent.join(format!(".replace-{}", std::process::id()));
+                    fs::rename(&final_path, &backup)
+                        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+                    if let Err(error) = fs::rename(&staging, &final_path) {
+                        let _ = fs::rename(&backup, &final_path);
+                        return Err(AcquisitionError::Io(error.to_string()));
+                    }
+                    let _ = fs::remove_dir_all(backup);
+                } else {
+                    return Err(AcquisitionError::AlreadyInstalled(request.model.clone()));
+                }
+            } else {
+                fs::rename(&staging, &final_path)
+                    .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+            }
+            let catalog = self.catalog.as_ref().ok_or_else(|| {
+                AcquisitionError::InvalidRequest(
+                    "a catalog is required to finish installation".to_owned(),
+                )
+            })?;
+            catalog.refresh().await.map_err(AcquisitionError::Catalog)?;
+            let descriptor = catalog
+                .resolve(&ModelReference::id(
+                    request.model.name.clone(),
+                    Some(request.model.version.clone()),
+                ))
+                .await
+                .map_err(AcquisitionError::Catalog)?;
+            Ok(InstallResult::Installed(descriptor))
+        }
+        .await;
+        if staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+}
+
+fn package_id(package: &ModelPackage) -> Result<ModelId, AcquisitionError> {
+    let version = package
+        .manifest
+        .model_version
+        .clone()
+        .or_else(|| package.manifest.version.clone())
+        .ok_or_else(|| AcquisitionError::InvalidPackage {
+            path: package.root.clone(),
+            reason: "model version is required".to_owned(),
+        })?;
+    ModelId::new(package.manifest.id.clone(), version).map_err(AcquisitionError::Catalog)
+}
+
+fn copy_package(
+    source: &Path,
+    destination: &Path,
+    limit: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), AcquisitionError> {
+    let mut bytes = 0;
+    copy_package_entry(source, destination, &mut bytes, limit, cancellation)?;
+    Ok(())
+}
+
+fn copy_package_entry(
+    source: &Path,
+    destination: &Path,
+    bytes: &mut u64,
+    limit: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), AcquisitionError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(AcquisitionError::Cancelled);
+    }
+    let metadata =
+        fs::symlink_metadata(source).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(AcquisitionError::InvalidPackage {
+            path: source.to_path_buf(),
+            reason: "symbolic links are not allowed".to_owned(),
+        });
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let mut entries = fs::read_dir(source)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            copy_package_entry(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                bytes,
+                limit,
+                cancellation,
+            )?;
+        }
+    } else if metadata.is_file() {
+        *bytes = bytes.saturating_add(metadata.len());
+        if *bytes > limit {
+            return Err(AcquisitionError::LimitExceeded {
+                limit,
+                actual: *bytes,
+            });
+        }
+        fs::copy(source, destination).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+    } else {
+        return Err(AcquisitionError::InvalidPackage {
+            path: source.to_path_buf(),
+            reason: "unsupported filesystem entry".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct ModelHandle {
     model_id: String,
@@ -631,6 +1214,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.package_path, PathBuf::from(&first));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn installs_verified_package_atomically_and_refreshes_catalog() {
+        use super::{
+            AcquisitionConfig, FileModelSource, InstallMode, InstallResult, ModelFetchRequest,
+            ModelId, ModelInstaller, ModelSourceReference,
+        };
+        use std::sync::Arc;
+        let root = std::env::temp_dir().join(format!("ml-runtime-install-{}", std::process::id()));
+        let source_root = root.join("source");
+        let catalog_root = root.join("models");
+        fs::create_dir_all(source_root.join("artifacts")).unwrap();
+        fs::write(
+            source_root.join("manifest.json"),
+            r#"{"id":"acquired","model_version":"1.0.0","format":"unknown","artifact":"artifacts/model.bin"}"#,
+        )
+        .unwrap();
+        fs::write(source_root.join("artifacts/model.bin"), b"model").unwrap();
+
+        let catalog = Arc::new(FilesystemModelCatalog::new(&catalog_root));
+        let installer = ModelInstaller::new(&catalog_root)
+            .with_catalog(Arc::clone(&catalog))
+            .with_config(AcquisitionConfig {
+                max_download_bytes: 1024,
+                timeout_secs: 30,
+            });
+        let request = ModelFetchRequest {
+            model: ModelId::new("acquired", "1.0.0").unwrap(),
+            source: ModelSourceReference::Path(source_root.clone()),
+        };
+        let result = installer
+            .install(
+                &FileModelSource::new(),
+                &request,
+                InstallMode::KeepExisting,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, InstallResult::Installed(_)));
+        assert_eq!(catalog.list().await.unwrap().len(), 1);
+        let existing = installer
+            .install(
+                &FileModelSource::new(),
+                &request,
+                InstallMode::KeepExisting,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(existing, InstallResult::AlreadyInstalled(_)));
+        assert!(!catalog_root
+            .join(".staging")
+            .join("acquired-1.0.0-")
+            .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_identity_mismatch_without_catalog_entry() {
+        use super::{
+            FileModelSource, InstallMode, ModelFetchRequest, ModelId, ModelInstaller,
+            ModelSourceReference,
+        };
+        use std::sync::Arc;
+        let root = std::env::temp_dir().join(format!("ml-runtime-mismatch-{}", std::process::id()));
+        let source = root.join("source");
+        fs::create_dir_all(source.join("artifacts")).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            r#"{"id":"other","model_version":"1.0.0","format":"unknown","artifact":"artifacts/model.bin"}"#,
+        )
+        .unwrap();
+        fs::write(source.join("artifacts/model.bin"), b"model").unwrap();
+        let catalog = Arc::new(FilesystemModelCatalog::new(root.join("models")));
+        let installer = ModelInstaller::new(root.join("models")).with_catalog(Arc::clone(&catalog));
+        let request = ModelFetchRequest {
+            model: ModelId::new("requested", "1.0.0").unwrap(),
+            source: ModelSourceReference::Path(source),
+        };
+        assert!(matches!(
+            installer
+                .install(
+                    &FileModelSource::new(),
+                    &request,
+                    InstallMode::KeepExisting,
+                    None
+                )
+                .await,
+            Err(super::AcquisitionError::IdentityMismatch { .. })
+        ));
+        assert!(catalog.list().await.unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 }

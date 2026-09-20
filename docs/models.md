@@ -54,3 +54,26 @@ Catalogs answer where a model package is. Providers answer where inference
 executes, and backends answer how it is computed. Discovery therefore does not
 load models or select an execution target. Configure catalog roots explicitly
 with `Runtime::builder().catalog(...)`.
+
+## Acquisition and installation
+
+Acquisition is separate from discovery and execution:
+
+```
+source -> acquire -> verify -> atomic install -> catalog -> resolve -> load -> execute
+```
+
+`ModelSource` obtains a package, while `ModelInstaller` verifies its manifest,
+artifact integrity, and requested `ModelId` before renaming it into the
+explicitly configured catalog root. Downloads are bounded, cancellation-aware,
+and staged under `.staging`; failed operations are removed and never become
+catalog entries. Installing does not load or execute a model. Existing valid
+packages are reported as already installed unless replacement is explicitly
+requested.
+
+The CLI supports local package acquisition with:
+
+```
+ml-runtime models install examples/models/linear --models models --json
+ml-runtime models verify linear@1 --models models
+```

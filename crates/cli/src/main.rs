@@ -3,8 +3,9 @@ use ml_runtime::ml_runtime_inference::{
     ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime::ml_runtime_model::{
-    FilesystemModelCatalog, ModelCatalog, ModelFormat, ModelLocation, ModelPackage, ModelReference,
-    ModelSpec,
+    FileModelSource, FilesystemModelCatalog, InstallMode, InstallResult, ModelCatalog,
+    ModelFetchRequest, ModelFormat, ModelId, ModelInstaller, ModelLocation, ModelPackage,
+    ModelReference, ModelSourceReference, ModelSpec,
 };
 use ml_runtime::{Runtime, RuntimeCapabilities};
 use ml_runtime_coreml_backend::CoreMlBackend;
@@ -16,6 +17,7 @@ use ml_runtime_onnx_backend::OnnxBackend;
 use ml_runtime_server_provider::ServerProvider;
 use ml_runtime_webgpu_backend::WebgpuBackend;
 use serde_json::json;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "ml-runtime")]
@@ -28,6 +30,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Models {
+        #[command(subcommand)]
+        command: Option<ModelCommands>,
         #[arg(long, default_value = "examples/models")]
         models: String,
         #[arg(long)]
@@ -62,6 +66,24 @@ enum Commands {
         json: bool,
     },
     Serve(ServeArgs),
+}
+
+#[derive(Subcommand)]
+enum ModelCommands {
+    Install {
+        source: String,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Verify {
+        model: String,
+        #[arg(long, default_value = "examples/models")]
+        models: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -107,7 +129,11 @@ struct ServeArgs {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Models { models, json } => {
+        Commands::Models {
+            command: None,
+            models,
+            json,
+        } => {
             let catalog = FilesystemModelCatalog::new(models);
             let models = catalog.list().await?;
             if json {
@@ -122,6 +148,95 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model.id.name, model.id.version, model.format
                     );
                 }
+            }
+        }
+        Commands::Models {
+            command:
+                Some(ModelCommands::Install {
+                    source,
+                    replace,
+                    json,
+                }),
+            models,
+            ..
+        } => {
+            let source_path = std::path::PathBuf::from(&source);
+            let package = ModelPackage::open(&source_path)
+                .map_err(|error| format!("open model package: {error}"))?;
+            let version = package
+                .manifest
+                .model_version
+                .clone()
+                .or_else(|| package.manifest.version.clone())
+                .ok_or("model package has no version")?;
+            let request = ModelFetchRequest {
+                model: ModelId::new(package.manifest.id.clone(), version)?,
+                source: ModelSourceReference::Path(source_path),
+            };
+            let catalog = Arc::new(FilesystemModelCatalog::new(&models));
+            let result = ModelInstaller::new(&models)
+                .with_catalog(Arc::clone(&catalog))
+                .install(
+                    &FileModelSource::new(),
+                    &request,
+                    if replace {
+                        InstallMode::Replace
+                    } else {
+                        InstallMode::KeepExisting
+                    },
+                    None,
+                )
+                .await?;
+            let (descriptor, status) = match result {
+                InstallResult::Installed(descriptor) => (descriptor, "installed"),
+                InstallResult::AlreadyInstalled(descriptor) => (descriptor, "already_installed"),
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "model": descriptor.id.name,
+                        "version": descriptor.id.version,
+                        "format": descriptor.format,
+                        "installed_path": descriptor.package_path,
+                        "status": status,
+                    }))?
+                );
+            } else {
+                println!(
+                    "{}@{}: {}",
+                    descriptor.id.name, descriptor.id.version, status
+                );
+                println!("installed path: {}", descriptor.package_path.display());
+            }
+        }
+        Commands::Models {
+            command:
+                Some(ModelCommands::Verify {
+                    model,
+                    models,
+                    json,
+                }),
+            ..
+        } => {
+            let catalog = FilesystemModelCatalog::new(models);
+            let id = ModelId::parse(&model)?;
+            let valid = catalog.validate(&id).await.is_ok();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "model": id.name,
+                        "version": id.version,
+                        "installed": valid,
+                        "valid": valid,
+                        "loaded": false,
+                    }))?
+                );
+            } else if valid {
+                println!("{}: valid", id);
+            } else {
+                return Err(format!("model is not valid: {id}").into());
             }
         }
         Commands::Status { json } => {

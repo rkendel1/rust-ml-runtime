@@ -30,6 +30,11 @@ export interface InferRequest {
   execution?: ExecutionPolicy
 }
 
+export interface InstallModelRequest {
+  source: string
+  replace?: boolean
+}
+
 export type InferenceStreamEvent =
   | { Started: Record<string, unknown> }
   | { Output: unknown }
@@ -59,6 +64,17 @@ export async function createRuntime(config: RuntimeConfig = {}) {
     },
     async resolveModel(reference: string) {
       const args = ["inspect", reference, "--json"]
+      if (config.modelsPath) args.push("--models", config.modelsPath)
+      return runJson(binaryPath, args)
+    },
+    async installModel(request: InstallModelRequest) {
+      const args = ["models", "install", request.source, "--json"]
+      if (request.replace) args.push("--replace")
+      if (config.modelsPath) args.push("--models", config.modelsPath)
+      return runJson(binaryPath, args)
+    },
+    async verifyModel(reference: string) {
+      const args = ["models", "verify", reference, "--json"]
       if (config.modelsPath) args.push("--models", config.modelsPath)
       return runJson(binaryPath, args)
     },
