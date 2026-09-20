@@ -1043,13 +1043,11 @@ impl Runtime {
                     }
                     Err(error) => return Err(error),
                 };
-                result.metadata.model_load_ms = Some(
-                    if cache_hit {
-                        0.0
-                    } else {
-                        model_load_started.elapsed().as_secs_f64() * 1000.0
-                    },
-                );
+                result.metadata.model_load_ms = Some(if cache_hit {
+                    0.0
+                } else {
+                    model_load_started.elapsed().as_secs_f64() * 1000.0
+                });
                 let capabilities = backend.capabilities();
                 let output = result.output.clone();
                 decorate_metadata(
