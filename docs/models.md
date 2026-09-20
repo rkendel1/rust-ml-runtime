@@ -38,3 +38,19 @@ runtime depend on a backend-specific format:
 The checked-in `examples/models/linear` package is executable by the CPU
 backend. Run it with `cargo run -p ml-runtime-cli -- run examples/models/linear
 --tensor 2,4`.
+
+## Catalog and execution
+
+`FilesystemModelCatalog` discovers and validates packages without loading a
+backend. A catalog descriptor has stable identity (`name@version`), package
+location, format, and manifest metadata; resolving it produces a `ModelSpec`
+for the runtime. The lifecycle is:
+
+```
+artifact -> package -> catalog descriptor -> model spec -> loaded model -> runtime resource
+```
+
+Catalogs answer where a model package is. Providers answer where inference
+executes, and backends answer how it is computed. Discovery therefore does not
+load models or select an execution target. Configure catalog roots explicitly
+with `Runtime::builder().catalog(...)`.
