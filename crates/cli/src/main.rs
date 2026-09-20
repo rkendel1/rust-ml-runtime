@@ -37,6 +37,7 @@ enum Commands {
         json: bool,
     },
     Run(RunArgs),
+    Serve(ServeArgs),
 }
 
 #[derive(Args)]
@@ -60,6 +61,16 @@ struct RunArgs {
     allow_remote_fallback: bool,
     #[arg(long)]
     require_remote: bool,
+    #[arg(long)]
+    endpoint: Option<String>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    bind: String,
+    #[arg(long, default_value = "examples/models")]
+    models: String,
 }
 
 #[tokio::main]
@@ -67,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Models => {
-            let runtime = build_runtime(None, None, false, false);
+            let runtime = build_runtime(None, None, false, false, None);
             let models = runtime.models();
             if models.list().is_empty() {
                 println!("No models loaded");
@@ -78,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Providers => {
-            let runtime = build_runtime(None, None, false, false);
+            let runtime = build_runtime(None, None, false, false, None);
             for provider in runtime.providers().list() {
                 println!(
                     "{}\tavailable={}\tremote={}\tlocal={}",
@@ -87,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Backends => {
-            let runtime = build_runtime(None, None, false, false);
+            let runtime = build_runtime(None, None, false, false, None);
             for backend in runtime.backends().list() {
                 println!(
                     "{}\tavailable={}\taccelerators={:?}",
@@ -96,13 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Capabilities { json } => {
-            let runtime = build_runtime(None, None, false, false);
+            let runtime = build_runtime(None, None, false, false, None);
             render_capabilities(&runtime.capabilities(), json)?;
         }
         Commands::Inspect { model, json } => {
             let package = ModelPackage::open(&model)
                 .map_err(|error| format!("open model package: {error}"))?;
-            let runtime = build_runtime(None, None, false, false);
+            let runtime = build_runtime(None, None, false, false, None);
             let selection = runtime.selection_for(&package.spec())?;
             if json {
                 println!(
@@ -136,8 +147,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.provider.clone(),
                 args.allow_remote_fallback,
                 args.prefer_acceleration,
+                args.endpoint.as_deref(),
             );
-            let model = if std::path::Path::new(&args.model).is_dir() {
+            let remote = args.endpoint.is_some();
+            let model = if remote {
+                let (id, version) = args
+                    .model
+                    .split_once('@')
+                    .map_or((args.model.as_str(), None), |(id, version)| {
+                        (id, Some(version.to_owned()))
+                    });
+                {
+                    let mut spec = ModelSpec::new(id, ModelFormat::Unknown, ModelLocation::Memory);
+                    spec.version = version;
+                    spec
+                }
+            } else if std::path::Path::new(&args.model).is_dir() {
                 ModelPackage::open(&args.model)
                     .map_err(|error| format!("open model package: {error}"))?
                     .spec()
@@ -156,7 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => Input::Text(args.input),
             };
             let request = InferenceRequest {
-                model: ModelReference::Spec(model),
+                model: if remote {
+                    ModelReference::id(model.id, model.version)
+                } else {
+                    ModelReference::Spec(model)
+                },
                 input,
                 options: InferenceOptions {
                     require_remote: args.require_remote,
@@ -177,6 +206,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+        Commands::Serve(args) => {
+            let runtime = build_runtime(None, None, false, false, None);
+            ml_runtime_server_provider::serve(runtime, args.models, args.bind).await?;
+        }
     }
     Ok(())
 }
@@ -186,6 +219,7 @@ fn build_runtime(
     provider: Option<String>,
     allow_remote_fallback: bool,
     prefer_acceleration: bool,
+    endpoint: Option<&str>,
 ) -> Runtime {
     let mut builder = Runtime::builder()
         .register_backend(CpuBackend::default())
@@ -194,14 +228,21 @@ fn build_runtime(
         .register_backend(CudaBackend::default())
         .register_backend(WebgpuBackend::default())
         .register_provider(LocalProvider::default())
-        .register_provider(HttpProvider::new("https://example.invalid/infer"))
+        .register_provider(HttpProvider::new(
+            endpoint.unwrap_or("https://example.invalid"),
+        ))
         .register_provider(ServerProvider::new("unix:///tmp/ml-runtime.sock"))
         .allow_remote_fallback(allow_remote_fallback)
         .prefer_acceleration(prefer_acceleration);
 
+    if endpoint.is_some() {
+        builder = builder.provider("remote");
+    }
+
     if let Some(backend) = backend {
         builder = builder.backend(backend);
     }
+
     if let Some(provider) = provider {
         builder = builder.provider(provider);
     }

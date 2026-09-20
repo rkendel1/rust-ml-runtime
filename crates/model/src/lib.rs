@@ -150,8 +150,17 @@ impl ModelSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelReference {
-    Id(String),
+    Id { id: String, version: Option<String> },
     Spec(ModelSpec),
+}
+
+impl ModelReference {
+    pub fn id(id: impl Into<String>, version: Option<String>) -> Self {
+        Self::Id {
+            id: id.into(),
+            version,
+        }
+    }
 }
 
 impl From<ModelSpec> for ModelReference {

@@ -508,12 +508,17 @@ impl Runtime {
 
     async fn resolve_loaded_model(&self, reference: &ModelReference) -> RuntimeResult<LoadedModel> {
         match reference {
-            ModelReference::Id(id) => self
+            ModelReference::Id { id, version } => self
                 .loaded_models
                 .read()
                 .expect("loaded model registry poisoned")
                 .get(id)
                 .cloned()
+                .filter(|loaded| {
+                    version
+                        .as_ref()
+                        .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
+                })
                 .ok_or_else(|| RuntimeError::ModelNotFound { model: id.clone() }),
             ModelReference::Spec(spec) => {
                 if let Some(existing) = self
@@ -552,14 +557,18 @@ impl Runtime {
         }
 
         match &request.model {
-            ModelReference::Id(id) => {
+            ModelReference::Id { id, version } => {
                 let loaded = self
                     .loaded_models
                     .read()
                     .expect("loaded model registry poisoned")
                     .get(id)
                     .cloned();
-                if let Some(loaded) = loaded {
+                if let Some(loaded) = loaded.filter(|loaded| {
+                    version
+                        .as_ref()
+                        .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
+                }) {
                     return Ok(RuntimeSelection {
                         model: loaded.spec.id,
                         provider: "local".to_owned(),
@@ -699,7 +708,7 @@ where
 
 fn model_id(reference: &ModelReference) -> String {
     match reference {
-        ModelReference::Id(id) => id.clone(),
+        ModelReference::Id { id, .. } => id.clone(),
         ModelReference::Spec(spec) => spec.id.clone(),
     }
 }
@@ -841,7 +850,7 @@ mod tests {
 
         let result = runtime
             .infer(InferenceRequest {
-                model: ModelReference::Id("remote-model".to_owned()),
+                model: ModelReference::id("remote-model", None),
                 input: Input::Text("hello".to_owned()),
                 options: InferenceOptions {
                     require_remote: true,
@@ -858,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn only_falls_back_to_remote_when_enabled() {
         let request = InferenceRequest {
-            model: ModelReference::Id("missing".to_owned()),
+            model: ModelReference::id("missing", None),
             input: Input::Text("hello".to_owned()),
             options: InferenceOptions::default(),
         };
@@ -981,7 +990,7 @@ mod tests {
 
         let mut stream = runtime
             .infer_stream(InferenceRequest {
-                model: ModelReference::Id("remote-model".to_owned()),
+                model: ModelReference::id("remote-model", None),
                 input: Input::Text("hello".to_owned()),
                 options: InferenceOptions {
                     stream: true,

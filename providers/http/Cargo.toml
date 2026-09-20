@@ -9,5 +9,8 @@ async-trait.workspace = true
 ml-runtime-common = { path = "../../crates/common" }
 ml-runtime-inference = { path = "../../crates/inference" }
 ml-runtime-provider = { path = "../../crates/provider" }
+ml-runtime-protocol = { path = "../../crates/protocol" }
+reqwest.workspace = true
+tokio.workspace = true
 tokio-stream.workspace = true
 serde.workspace = true
