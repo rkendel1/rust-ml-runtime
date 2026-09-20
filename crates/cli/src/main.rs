@@ -27,7 +27,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Models,
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Metrics {
+        #[arg(long)]
+        json: bool,
+    },
     Providers,
     Backends,
     Capabilities {
@@ -40,6 +47,12 @@ enum Commands {
         json: bool,
     },
     Run(RunArgs),
+    Bench {
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Serve(ServeArgs),
 }
 
@@ -70,6 +83,8 @@ struct RunArgs {
     execution: Option<String>,
     #[arg(long)]
     stream: bool,
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Args)]
@@ -95,18 +110,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Status => {
+        Commands::Status { json } => {
             let runtime = build_runtime(None, None, false, false, None);
             let status = runtime.status();
-            println!("Loaded models: {}", status.loaded_models);
-            println!(
-                "Model cache: {} / {}",
-                status.loaded_models, status.max_models
-            );
-            println!(
-                "Concurrent inference: 0 / {}",
-                status.max_concurrent_inferences
-            );
+            let snapshot = runtime.snapshot();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("Loaded models: {}", status.loaded_models);
+                println!("Running: {}", snapshot.active_inferences);
+                println!("Queued: {}", snapshot.queued_inferences);
+                println!(
+                    "Model cache: {} / {}",
+                    status.loaded_models, status.max_models
+                );
+                for resource in runtime.resources() {
+                    println!(
+                        "{}\t{}\t{:?}\t{} bytes\tlast_used={}",
+                        resource.id,
+                        resource.target,
+                        resource.state,
+                        resource.memory_bytes,
+                        resource.last_used
+                    );
+                }
+            }
+        }
+        Commands::Metrics { json } => {
+            let runtime = build_runtime(None, None, false, false, None);
+            let metrics = runtime.metrics();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&metrics)?);
+            } else {
+                println!("Requests: {}", metrics.total_requests);
+                println!("Succeeded: {}", metrics.successful_requests);
+                println!("Failed: {}", metrics.failed_requests);
+                println!("Cancelled: {}", metrics.cancelled_requests);
+                println!("Local: {}", metrics.local_executions);
+                println!("Remote: {}", metrics.remote_executions);
+                println!("Fallbacks: {}", metrics.fallback_executions);
+                println!("Streaming: {}", metrics.streaming_requests);
+            }
         }
         Commands::Providers => {
             let runtime = build_runtime(None, None, false, false, None);
@@ -262,7 +306,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "provider={} backend={} hardware={:?}",
                         result.metadata.provider, result.metadata.backend, result.metadata.hardware
                     );
+                    if args.verbose {
+                        println!(
+                            "model={} target={} routing={:?} fallback={} cache_hit={} batch_size={} queue_wait_ms={:?} model_load_ms={:?} execution_ms={:?} total_ms={:?}",
+                            result.metadata.model,
+                            result.metadata.execution_target,
+                            result.metadata.routing_policy,
+                            result.metadata.fallback,
+                            result.metadata.cache_hit,
+                            result.metadata.batch_size,
+                            result.metadata.queue_wait_ms,
+                            result.metadata.model_load_ms,
+                            result.metadata.execution_ms,
+                            result.metadata.latency_ms,
+                        );
+                    }
                 }
+            }
+        }
+        Commands::Bench { iterations, json } => {
+            let runtime = build_runtime(None, None, false, false, None);
+            let model = ModelSpec::new(
+                "benchmark-model",
+                ModelFormat::Unknown,
+                ModelLocation::Memory,
+            );
+            let load_start = std::time::Instant::now();
+            runtime.load(model.clone()).await?;
+            let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            for _ in 0..iterations.max(1) {
+                runtime
+                    .infer(InferenceRequest {
+                        model: model.clone().into(),
+                        input: Input::Text("benchmark input".to_owned()),
+                        options: InferenceOptions::default(),
+                    })
+                    .await?;
+            }
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let output = json!({
+                "iterations": iterations.max(1),
+                "model_load_ms": load_ms,
+                "total_inference_ms": elapsed_ms,
+                "average_inference_ms": elapsed_ms / iterations.max(1) as f64,
+                "metrics": runtime.metrics(),
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("iterations={}", iterations.max(1));
+                println!("model_load_ms={load_ms:.3}");
+                println!(
+                    "average_inference_ms={:.3}",
+                    elapsed_ms / iterations.max(1) as f64
+                );
             }
         }
         Commands::Serve(args) => {

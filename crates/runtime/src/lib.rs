@@ -9,11 +9,11 @@ use ml_runtime_model::{ModelFormat, ModelHandle, ModelLocation, ModelReference, 
 use ml_runtime_provider::{Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
     },
     time::{Duration, Instant},
 };
@@ -77,6 +77,159 @@ pub struct RuntimeStatus {
     pub max_models: usize,
     pub max_concurrent_inferences: usize,
     pub max_concurrent_model_loads: usize,
+}
+
+pub type ExecutionId = String;
+pub type RequestId = String;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionCompletion {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionRecord {
+    pub execution_id: ExecutionId,
+    pub request_id: RequestId,
+    pub model_id: String,
+    pub model_version: String,
+    pub provider: String,
+    pub backend: String,
+    pub target: String,
+    pub routing_policy: ExecutionPolicy,
+    pub fallback: Option<String>,
+    pub cache_hit: bool,
+    pub batch_size: usize,
+    pub queued_duration: Duration,
+    pub model_load_duration: Duration,
+    pub execution_duration: Duration,
+    pub total_duration: Duration,
+    pub streaming: bool,
+    pub output_event_count: usize,
+    pub completion: ExecutionCompletion,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeMetricsSnapshot {
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub local_executions: u64,
+    pub remote_executions: u64,
+    pub fallback_executions: u64,
+    pub fallback_failures: u64,
+    pub model_loads: u64,
+    pub model_load_failures: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub evictions: u64,
+    pub queued_requests: u64,
+    pub active_inferences: usize,
+    pub active_model_loads: usize,
+    pub batch_executions: u64,
+    pub individual_executions: u64,
+    pub total_requests_batched: u64,
+    pub streaming_requests: u64,
+    pub streamed_output_events: u64,
+    pub cancelled_streams: u64,
+    pub compatibility_streams: u64,
+    pub queue_wait_micros: Vec<u64>,
+    pub model_load_micros: Vec<u64>,
+    pub execution_micros: Vec<u64>,
+    pub total_duration_micros: Vec<u64>,
+    pub batch_sizes: Vec<usize>,
+}
+
+#[derive(Default)]
+pub struct RuntimeMetrics {
+    total_requests: AtomicU64,
+    successful_requests: AtomicU64,
+    failed_requests: AtomicU64,
+    cancelled_requests: AtomicU64,
+    local_executions: AtomicU64,
+    remote_executions: AtomicU64,
+    fallback_executions: AtomicU64,
+    fallback_failures: AtomicU64,
+    model_loads: AtomicU64,
+    model_load_failures: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    evictions: AtomicU64,
+    queued_requests: AtomicU64,
+    active_inferences: AtomicUsize,
+    active_model_loads: AtomicUsize,
+    batch_executions: AtomicU64,
+    individual_executions: AtomicU64,
+    total_requests_batched: AtomicU64,
+    streaming_requests: AtomicU64,
+    streamed_output_events: AtomicU64,
+    cancelled_streams: AtomicU64,
+    compatibility_streams: AtomicU64,
+    queue_wait_micros: Mutex<Vec<u64>>,
+    model_load_micros: Mutex<Vec<u64>>,
+    execution_micros: Mutex<Vec<u64>>,
+    total_duration_micros: Mutex<Vec<u64>>,
+    batch_sizes: Mutex<Vec<usize>>,
+}
+
+impl RuntimeMetrics {
+    pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
+        let values = |values: &Mutex<Vec<u64>>| values.lock().expect("metrics poisoned").clone();
+        RuntimeMetricsSnapshot {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            successful_requests: self.successful_requests.load(Ordering::Relaxed),
+            failed_requests: self.failed_requests.load(Ordering::Relaxed),
+            cancelled_requests: self.cancelled_requests.load(Ordering::Relaxed),
+            local_executions: self.local_executions.load(Ordering::Relaxed),
+            remote_executions: self.remote_executions.load(Ordering::Relaxed),
+            fallback_executions: self.fallback_executions.load(Ordering::Relaxed),
+            fallback_failures: self.fallback_failures.load(Ordering::Relaxed),
+            model_loads: self.model_loads.load(Ordering::Relaxed),
+            model_load_failures: self.model_load_failures.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            queued_requests: self.queued_requests.load(Ordering::Relaxed),
+            active_inferences: self.active_inferences.load(Ordering::Relaxed),
+            active_model_loads: self.active_model_loads.load(Ordering::Relaxed),
+            batch_executions: self.batch_executions.load(Ordering::Relaxed),
+            individual_executions: self.individual_executions.load(Ordering::Relaxed),
+            total_requests_batched: self.total_requests_batched.load(Ordering::Relaxed),
+            streaming_requests: self.streaming_requests.load(Ordering::Relaxed),
+            streamed_output_events: self.streamed_output_events.load(Ordering::Relaxed),
+            cancelled_streams: self.cancelled_streams.load(Ordering::Relaxed),
+            compatibility_streams: self.compatibility_streams.load(Ordering::Relaxed),
+            queue_wait_micros: values(&self.queue_wait_micros),
+            model_load_micros: values(&self.model_load_micros),
+            execution_micros: values(&self.execution_micros),
+            total_duration_micros: values(&self.total_duration_micros),
+            batch_sizes: self.batch_sizes.lock().expect("metrics poisoned").clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelResource {
+    pub id: String,
+    pub version: Option<String>,
+    pub target: String,
+    pub state: ModelLifecycleState,
+    pub memory_bytes: u64,
+    pub last_used: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeSnapshot {
+    pub active_inferences: usize,
+    pub active_model_loads: usize,
+    pub queued_inferences: usize,
+    pub loaded_models: usize,
+    pub cache_entries: usize,
+    pub cache_memory_bytes: u64,
+    pub metrics: RuntimeMetricsSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -176,6 +329,7 @@ struct LoadedModel {
     backend_name: String,
     provider_name: String,
     last_used: u64,
+    memory_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -346,6 +500,9 @@ impl RuntimeBuilder {
                 self.config.max_concurrent_model_loads.max(1),
             )),
             cache_clock: AtomicU64::new(0),
+            metrics: Arc::new(RuntimeMetrics::default()),
+            execution_clock: AtomicU64::new(0),
+            execution_records: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -358,6 +515,9 @@ pub struct Runtime {
     inference_semaphore: Arc<Semaphore>,
     load_semaphore: Arc<Semaphore>,
     cache_clock: AtomicU64,
+    metrics: Arc<RuntimeMetrics>,
+    execution_clock: AtomicU64,
+    execution_records: Mutex<VecDeque<ExecutionRecord>>,
 }
 
 impl Runtime {
@@ -431,6 +591,50 @@ impl Runtime {
         }
     }
 
+    pub fn metrics(&self) -> RuntimeMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    pub fn executions(&self) -> Vec<ExecutionRecord> {
+        self.execution_records
+            .lock()
+            .expect("execution records poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn resources(&self) -> Vec<ModelResource> {
+        self.loaded_models
+            .read()
+            .expect("loaded model registry poisoned")
+            .values()
+            .map(|model| ModelResource {
+                id: model.spec.id.clone(),
+                version: model.spec.version.clone(),
+                target: format!("{}/{}", model.provider_name, model.backend_name),
+                state: ModelLifecycleState::Ready,
+                memory_bytes: model.memory_bytes,
+                last_used: model.last_used,
+            })
+            .collect()
+    }
+
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        let resources = self.resources();
+        let metrics = self.metrics();
+        RuntimeSnapshot {
+            active_inferences: metrics.active_inferences,
+            active_model_loads: metrics.active_model_loads,
+            queued_inferences: (metrics.queued_requests as usize)
+                .saturating_sub(metrics.active_inferences),
+            loaded_models: resources.len(),
+            cache_entries: resources.len(),
+            cache_memory_bytes: resources.iter().map(|resource| resource.memory_bytes).sum(),
+            metrics,
+        }
+    }
+
     pub fn selection_for(&self, model: &ModelSpec) -> RuntimeResult<RuntimeSelection> {
         let backend_name = self.select_backend(model)?;
         let backend = self
@@ -478,8 +682,13 @@ impl Runtime {
             .expect("loaded model registry poisoned")
             .get(&key)
         {
+            self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(runtime_handle(existing));
         }
+        self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .active_model_loads
+            .fetch_add(1, Ordering::Relaxed);
         let _permit = self
             .load_semaphore
             .acquire()
@@ -491,6 +700,7 @@ impl Runtime {
             .expect("loaded model registry poisoned")
             .get(&key)
         {
+            self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(runtime_handle(existing));
         }
         let backend = self
@@ -499,7 +709,19 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::backend_unavailable(&backend_name, "not registered"))?
             .clone();
         let timeout_ms = self.config.timeout_ms;
-        let handle = run_with_timeout(timeout_ms, "load", backend.load(&model)).await?;
+        let loaded = run_with_timeout(timeout_ms, "load", backend.load(&model)).await;
+        self.metrics
+            .active_model_loads
+            .fetch_sub(1, Ordering::Relaxed);
+        let handle = match loaded {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.metrics
+                    .model_load_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
 
         let mut cache = self
             .loaded_models
@@ -512,9 +734,12 @@ impl Runtime {
                 .map(|(key, _)| key.clone())
             {
                 cache.remove(&oldest);
+                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
+        self.metrics.model_loads.fetch_add(1, Ordering::Relaxed);
         let loaded = LoadedModel {
+            memory_bytes: model_memory_bytes(&model),
             spec: model,
             handle,
             backend_name,
@@ -616,10 +841,24 @@ impl Runtime {
             )
             .await;
         }
+        let batch_size = requests.len();
+        self.metrics
+            .total_requests
+            .fetch_add(batch_size as u64, Ordering::Relaxed);
+        self.metrics
+            .batch_executions
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .total_requests_batched
+            .fetch_add(batch_size as u64, Ordering::Relaxed);
+        self.metrics
+            .batch_sizes
+            .lock()
+            .expect("metrics poisoned")
+            .push(batch_size);
         let _permit = self.inference_semaphore.acquire().await.map_err(|_| {
             RuntimeError::execution("infer_batch", "runtime inference semaphore closed")
         })?;
-        let batch_size = requests.len();
         let mut results = run_with_timeout(
             self.config.timeout_ms,
             "infer_batch",
@@ -655,10 +894,70 @@ impl Runtime {
             result.metadata.batch_size = batch_size;
             result.metadata.cache_hit = true;
         }
+        self.metrics
+            .successful_requests
+            .fetch_add(results.len() as u64, Ordering::Relaxed);
         Ok(results)
     }
 
     pub async fn infer_with_cancellation(
+        &self,
+        request: InferenceRequest,
+        cancellation: CancellationToken,
+    ) -> RuntimeResult<InferenceResult> {
+        let started = Instant::now();
+        let request_id = format!(
+            "request-{}",
+            self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .active_inferences
+            .fetch_add(1, Ordering::Relaxed);
+        let model = model_details(&request.model);
+        let result = self.infer_inner(request.clone(), cancellation).await;
+        self.metrics
+            .active_inferences
+            .fetch_sub(1, Ordering::Relaxed);
+        match result {
+            Ok(mut result) => {
+                result.metadata.request_id = Some(request_id.clone());
+                self.record_execution(
+                    &request_id,
+                    started.elapsed(),
+                    &result.metadata,
+                    ExecutionCompletion::Succeeded,
+                );
+                self.metrics
+                    .successful_requests
+                    .fetch_add(1, Ordering::Relaxed);
+                Ok(result)
+            }
+            Err(error) => {
+                let completion = if matches!(error, RuntimeError::Cancelled) {
+                    self.metrics
+                        .cancelled_requests
+                        .fetch_add(1, Ordering::Relaxed);
+                    ExecutionCompletion::Cancelled
+                } else {
+                    self.metrics.failed_requests.fetch_add(1, Ordering::Relaxed);
+                    ExecutionCompletion::Failed
+                };
+                let metadata = ExecutionMetadata {
+                    request_id: Some(request_id.clone()),
+                    model: model.0,
+                    model_version: model.1,
+                    routing_policy: request.options.execution.clone(),
+                    streaming_requested: request.options.stream,
+                    ..ExecutionMetadata::default()
+                };
+                self.record_execution(&request_id, started.elapsed(), &metadata, completion);
+                Err(error)
+            }
+        }
+    }
+
+    async fn infer_inner(
         &self,
         request: InferenceRequest,
         cancellation: CancellationToken,
@@ -681,6 +980,13 @@ impl Runtime {
         match selection.provider.as_str() {
             "local" => {
                 let cache_hit = self.is_loaded(&request.model);
+                let model_load_started = Instant::now();
+                if cache_hit {
+                    self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
+
                 let loaded = match self.resolve_loaded_model(&request.model).await {
                     Ok(loaded) => loaded,
                     Err(error) if self.can_fallback(&request, &selection, &error) => {
@@ -737,6 +1043,11 @@ impl Runtime {
                     }
                     Err(error) => return Err(error),
                 };
+                result.metadata.model_load_ms = Some(if cache_hit {
+                    0.0
+                } else {
+                    model_load_started.elapsed().as_secs_f64() * 1000.0
+                });
                 let capabilities = backend.capabilities();
                 let output = result.output.clone();
                 decorate_metadata(
@@ -761,6 +1072,92 @@ impl Runtime {
                 self.infer_remote(request, cancellation, timeout_ms, input_tokens, selection)
                     .await
             }
+        }
+    }
+
+    fn record_execution(
+        &self,
+        request_id: &str,
+        total_duration: Duration,
+        metadata: &ExecutionMetadata,
+        completion: ExecutionCompletion,
+    ) {
+        let execution_id = format!(
+            "execution-{}",
+            self.execution_clock.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let execution_duration =
+            Duration::from_secs_f64(metadata.execution_ms.unwrap_or(0.0) / 1000.0);
+        let queued_duration =
+            Duration::from_secs_f64(metadata.queue_wait_ms.unwrap_or(0.0) / 1000.0);
+        let model_load_duration =
+            Duration::from_secs_f64(metadata.model_load_ms.unwrap_or(0.0) / 1000.0);
+        self.metrics
+            .queue_wait_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(queued_duration.as_micros() as u64);
+        self.metrics
+            .model_load_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(model_load_duration.as_micros() as u64);
+        self.metrics
+            .execution_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(execution_duration.as_micros() as u64);
+        self.metrics
+            .total_duration_micros
+            .lock()
+            .expect("metrics poisoned")
+            .push(total_duration.as_micros() as u64);
+        if metadata.provider == "local" {
+            self.metrics
+                .local_executions
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.metrics
+                .remote_executions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if metadata.fallback {
+            self.metrics
+                .fallback_executions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if metadata.streaming_requested {
+            self.metrics
+                .streaming_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let record = ExecutionRecord {
+            execution_id,
+            request_id: request_id.to_owned(),
+            model_id: metadata.model.clone(),
+            model_version: metadata.model_version.clone().unwrap_or_default(),
+            provider: metadata.provider.clone(),
+            backend: metadata.backend.clone(),
+            target: metadata.execution_target.clone(),
+            routing_policy: metadata.routing_policy.clone(),
+            fallback: metadata.fallback_from.clone(),
+            cache_hit: metadata.cache_hit,
+            batch_size: metadata.batch_size.max(1),
+            queued_duration,
+            model_load_duration,
+            execution_duration,
+            total_duration,
+            streaming: metadata.streaming_requested,
+            output_event_count: metadata.output_event_count,
+            completion,
+        };
+        let mut records = self
+            .execution_records
+            .lock()
+            .expect("execution records poisoned");
+        records.push_back(record);
+        while records.len() > 256 {
+            records.pop_front();
         }
     }
 
@@ -817,6 +1214,10 @@ impl Runtime {
         request: InferenceRequest,
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceStream> {
+        self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .streaming_requests
+            .fetch_add(1, Ordering::Relaxed);
         self.validate_request(&request)?;
         if !request.options.stream {
             return Err(RuntimeError::CapabilityMismatch {
@@ -846,6 +1247,9 @@ impl Runtime {
                         .infer_stream(&loaded.handle, &request, Some(cancellation.clone()))
                         .await?
                 } else {
+                    self.metrics
+                        .compatibility_streams
+                        .fetch_add(1, Ordering::Relaxed);
                     let result = backend
                         .infer(&loaded.handle, &request, Some(cancellation.clone()))
                         .await?;
@@ -863,6 +1267,7 @@ impl Runtime {
                     true,
                     buffer,
                     cancellation,
+                    self.metrics.clone(),
                 ))
             }
             provider_name => {
@@ -879,6 +1284,9 @@ impl Runtime {
                         .infer_stream(request.clone(), Some(cancellation.clone()))
                         .await?
                 } else {
+                    self.metrics
+                        .compatibility_streams
+                        .fetch_add(1, Ordering::Relaxed);
                     let result = provider
                         .infer(request.clone(), Some(cancellation.clone()))
                         .await?;
@@ -896,6 +1304,7 @@ impl Runtime {
                     false,
                     buffer,
                     cancellation,
+                    self.metrics.clone(),
                 ))
             }
         }
@@ -1241,6 +1650,15 @@ fn estimate_output_tokens(output: &Output) -> Option<u64> {
     }
 }
 
+fn model_memory_bytes(model: &ModelSpec) -> u64 {
+    match &model.location {
+        ModelLocation::Path(path) => std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn decorate_metadata(
     metadata: &mut ExecutionMetadata,
     output: &Output,
@@ -1280,6 +1698,7 @@ fn normalize_stream(
     cache_hit: bool,
     buffer: usize,
     cancellation: CancellationToken,
+    metrics: Arc<RuntimeMetrics>,
 ) -> InferenceStream {
     let (sender, receiver) = mpsc::channel(buffer);
     tokio::spawn(async move {
@@ -1311,6 +1730,7 @@ fn normalize_stream(
         while let Some(item) = tokio::select! {
             item = source.next() => item,
             _ = cancellation.cancelled() => {
+                metrics.cancelled_streams.fetch_add(1, Ordering::Relaxed);
                 let _ = sender.send(Err(RuntimeError::Cancelled)).await;
                 return;
             }
@@ -1332,6 +1752,9 @@ fn normalize_stream(
                     {
                         return;
                     }
+                    metrics
+                        .streamed_output_events
+                        .fetch_add(1, Ordering::Relaxed);
                     if chunk.done {
                         metadata.output_event_count = output_count;
                         metadata.completion_state = Some("completed".to_owned());
@@ -1783,5 +2206,35 @@ mod tests {
         assert_eq!(results[1].output, Output::Text("b".to_owned()));
         assert_eq!(results[0].metadata.batch_size, 2);
         assert_eq!(results[1].metadata.batch_size, 2);
+    }
+
+    #[tokio::test]
+    async fn records_execution_metrics_and_snapshot() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let model = ModelSpec::new("observed", ModelFormat::Unknown, ModelLocation::Memory);
+        let result = runtime
+            .infer(InferenceRequest {
+                model: model.into(),
+                input: Input::Text("hello".to_owned()),
+                options: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        let metrics = runtime.metrics();
+        assert_eq!(metrics.total_requests, 1);
+        assert_eq!(metrics.successful_requests, 1);
+        assert_eq!(runtime.executions().len(), 1);
+        assert_eq!(
+            runtime.executions()[0].completion,
+            ExecutionCompletion::Succeeded
+        );
+        assert_eq!(
+            runtime.executions()[0].request_id,
+            result.metadata.request_id.clone().unwrap()
+        );
+        assert_eq!(runtime.snapshot().loaded_models, 1);
     }
 }
