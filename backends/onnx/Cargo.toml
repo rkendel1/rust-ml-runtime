@@ -12,3 +12,4 @@ ml-runtime-inference = { path = "../../crates/inference" }
 ml-runtime-backend = { path = "../../crates/backend" }
 ml-runtime-model = { path = "../../crates/model" }
 serde.workspace = true
+ort = { version = "2.0.0-rc.13", features = ["api-27"] }

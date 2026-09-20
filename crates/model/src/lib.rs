@@ -11,11 +11,17 @@ pub type ModelMetadata = BTreeMap<String, String>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ModelFormat {
+    #[serde(rename = "onnx", alias = "Onnx")]
     Onnx,
+    #[serde(rename = "coreml", alias = "CoreMl")]
     CoreMl,
+    #[serde(rename = "gguf", alias = "Gguf")]
     Gguf,
+    #[serde(rename = "safetensors", alias = "Safetensors")]
     Safetensors,
+    #[serde(rename = "tensorrt", alias = "TensorRt")]
     TensorRt,
+    #[serde(rename = "unknown", alias = "Unknown")]
     Unknown,
 }
 
@@ -51,6 +57,19 @@ pub struct ModelManifest {
     pub artifact: String,
     #[serde(default)]
     pub metadata: ModelMetadata,
+    #[serde(default)]
+    pub inputs: Vec<ModelTensorSpec>,
+    #[serde(default)]
+    pub outputs: Vec<ModelTensorSpec>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelTensorSpec {
+    pub name: String,
+    #[serde(default)]
+    pub data_type: Option<String>,
+    #[serde(default)]
+    pub shape: Option<Vec<i64>>,
 }
 
 fn default_schema_version() -> u32 {
@@ -188,5 +207,19 @@ impl std::fmt::Debug for ModelHandle {
             .field("backend", &self.backend)
             .field("format", &self.format)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelFormat, ModelManifest};
+
+    #[test]
+    fn accepts_lowercase_manifest_formats() {
+        let manifest: ModelManifest = serde_json::from_str(
+            r#"{"id":"example","format":"onnx","artifact":"artifacts/model.onnx"}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.format, ModelFormat::Onnx);
     }
 }
