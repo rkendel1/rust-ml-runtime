@@ -6,6 +6,7 @@ const execFileAsync = promisify(execFile)
 
 export interface RuntimeConfig {
   binaryPath?: string
+  modelsPath?: string
   backend?: string
   provider?: string
   preferAcceleration?: boolean
@@ -51,6 +52,16 @@ export async function createRuntime(config: RuntimeConfig = {}) {
   const binaryPath = config.binaryPath ?? "ml-runtime"
 
   return {
+    async models() {
+      const args = ["models", "--json"]
+      if (config.modelsPath) args.push("--models", config.modelsPath)
+      return runJson(binaryPath, args)
+    },
+    async resolveModel(reference: string) {
+      const args = ["inspect", reference, "--json"]
+      if (config.modelsPath) args.push("--models", config.modelsPath)
+      return runJson(binaryPath, args)
+    },
     async capabilities() {
       return runJson(binaryPath, ["capabilities", "--json"])
     },

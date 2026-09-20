@@ -5,7 +5,10 @@ use ml_runtime_inference::{
     ExecutionMetadata, ExecutionPolicy, InferenceChunk, InferenceOptions, InferenceRequest,
     InferenceResult, InferenceStreamEvent, Input, Output,
 };
-use ml_runtime_model::{ModelFormat, ModelHandle, ModelLocation, ModelReference, ModelSpec};
+use ml_runtime_model::{
+    CatalogError, ModelCatalog, ModelDescriptor, ModelFormat, ModelHandle, ModelLocation,
+    ModelReference, ModelSpec,
+};
 use ml_runtime_provider::{Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -389,6 +392,7 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    catalog: Option<Arc<dyn ModelCatalog>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -397,6 +401,7 @@ impl Default for RuntimeBuilder {
             config: RuntimeConfig::default(),
             backends: BTreeMap::new(),
             providers: BTreeMap::new(),
+            catalog: None,
         }
     }
 }
@@ -409,6 +414,14 @@ impl RuntimeBuilder {
 
     pub fn provider(mut self, name: impl Into<String>) -> Self {
         self.config.selected_provider = Some(name.into());
+        self
+    }
+
+    pub fn catalog<C>(mut self, catalog: C) -> Self
+    where
+        C: ModelCatalog + 'static,
+    {
+        self.catalog = Some(Arc::new(catalog));
         self
     }
 
@@ -492,6 +505,7 @@ impl RuntimeBuilder {
             config: self.config.clone(),
             backends: self.backends,
             providers: self.providers,
+            catalog: self.catalog,
             loaded_models: RwLock::new(HashMap::new()),
             inference_semaphore: Arc::new(Semaphore::new(
                 self.config.max_concurrent_inferences.max(1),
@@ -511,6 +525,7 @@ pub struct Runtime {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    catalog: Option<Arc<dyn ModelCatalog>>,
     loaded_models: RwLock<HashMap<ModelCacheKey, LoadedModel>>,
     inference_semaphore: Arc<Semaphore>,
     load_semaphore: Arc<Semaphore>,
@@ -527,6 +542,43 @@ impl Runtime {
 
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    pub fn set_catalog<C>(&mut self, catalog: C)
+    where
+        C: ModelCatalog + 'static,
+    {
+        self.catalog = Some(Arc::new(catalog));
+    }
+
+    pub async fn catalog_models(&self) -> RuntimeResult<Vec<ModelDescriptor>> {
+        self.catalog
+            .as_ref()
+            .ok_or_else(|| RuntimeError::execution("catalog", "no model catalog configured"))?
+            .list()
+            .await
+            .map_err(catalog_error)
+    }
+
+    pub async fn resolve_model(
+        &self,
+        reference: &ModelReference,
+    ) -> RuntimeResult<ModelDescriptor> {
+        self.catalog
+            .as_ref()
+            .ok_or_else(|| RuntimeError::execution("catalog", "no model catalog configured"))?
+            .resolve(reference)
+            .await
+            .map_err(catalog_error)
+    }
+
+    pub async fn refresh_catalog(&self) -> RuntimeResult<()> {
+        self.catalog
+            .as_ref()
+            .ok_or_else(|| RuntimeError::execution("catalog", "no model catalog configured"))?
+            .refresh()
+            .await
+            .map_err(catalog_error)
     }
 
     pub fn models(&self) -> ModelRegistry {
@@ -959,7 +1011,7 @@ impl Runtime {
 
     async fn infer_inner(
         &self,
-        request: InferenceRequest,
+        mut request: InferenceRequest,
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceResult> {
         self.validate_request(&request)?;
@@ -972,6 +1024,24 @@ impl Runtime {
                 .map_err(|_| RuntimeError::execution("infer", "runtime inference semaphore closed"))?,
             _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
         };
+
+        let local_resolution = request.options.require_local
+            || (!request.options.require_remote
+                && matches!(
+                    request.options.execution,
+                    ExecutionPolicy::LocalOnly
+                        | ExecutionPolicy::PreferLocal
+                        | ExecutionPolicy::LocalThenRemote
+                ));
+        if local_resolution && !self.is_loaded(&request.model) {
+            if let (Some(catalog), ModelReference::Id { .. }) = (&self.catalog, &request.model) {
+                let descriptor = catalog
+                    .resolve(&request.model)
+                    .await
+                    .map_err(catalog_error)?;
+                request.model = ModelReference::Spec(descriptor.spec());
+            }
+        }
 
         let mut selection = self.select_for_request(&request)?;
         let timeout_ms = request.options.timeout_ms.or(self.config.timeout_ms);
@@ -1631,6 +1701,19 @@ fn model_details(reference: &ModelReference) -> (String, Option<String>) {
     match reference {
         ModelReference::Id { id, version } => (id.clone(), version.clone()),
         ModelReference::Spec(spec) => (spec.id.clone(), spec.version.clone()),
+    }
+}
+
+fn catalog_error(error: CatalogError) -> RuntimeError {
+    match error {
+        CatalogError::ModelNotFound(model) => RuntimeError::ModelNotFound { model },
+        CatalogError::InvalidIdentity(model) => RuntimeError::InvalidInput {
+            reason: format!("invalid model identity: {model}"),
+        },
+        other => RuntimeError::Execution {
+            operation: "catalog".to_owned(),
+            reason: other.to_string(),
+        },
     }
 }
 

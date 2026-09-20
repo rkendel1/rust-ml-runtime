@@ -3,7 +3,8 @@ use ml_runtime::ml_runtime_inference::{
     ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime::ml_runtime_model::{
-    ModelFormat, ModelLocation, ModelPackage, ModelReference, ModelSpec,
+    FilesystemModelCatalog, ModelCatalog, ModelFormat, ModelLocation, ModelPackage, ModelReference,
+    ModelSpec,
 };
 use ml_runtime::{Runtime, RuntimeCapabilities};
 use ml_runtime_coreml_backend::CoreMlBackend;
@@ -26,7 +27,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Models,
+    Models {
+        #[arg(long, default_value = "examples/models")]
+        models: String,
+        #[arg(long)]
+        json: bool,
+    },
     Status {
         #[arg(long)]
         json: bool,
@@ -43,6 +49,8 @@ enum Commands {
     },
     Inspect {
         model: String,
+        #[arg(long, default_value = "examples/models")]
+        models: String,
         #[arg(long)]
         json: bool,
     },
@@ -99,14 +107,20 @@ struct ServeArgs {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Models => {
-            let runtime = build_runtime(None, None, false, false, None);
-            let models = runtime.models();
-            if models.list().is_empty() {
+        Commands::Models { models, json } => {
+            let catalog = FilesystemModelCatalog::new(models);
+            let models = catalog.list().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&models)?);
+            } else if models.is_empty() {
                 println!("No models loaded");
             } else {
-                for model in models.list() {
-                    println!("{} ({:?}) via {:?}", model.id, model.format, model.backend);
+                println!("MODEL\tVERSION\tFORMAT");
+                for model in models {
+                    println!(
+                        "{}\t{}\t{:?}",
+                        model.id.name, model.id.version, model.format
+                    );
                 }
             }
         }
@@ -174,35 +188,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime = build_runtime(None, None, false, false, None);
             render_capabilities(&runtime.capabilities(), json)?;
         }
-        Commands::Inspect { model, json } => {
-            let package = ModelPackage::open(&model)
+        Commands::Inspect {
+            model,
+            models,
+            json,
+        } => {
+            let catalog = FilesystemModelCatalog::new(models);
+            let descriptor = if std::path::Path::new(&model).is_dir() {
+                let package = ModelPackage::open(&model)
+                    .map_err(|error| format!("open model package: {error}"))?;
+                let version = package
+                    .manifest
+                    .model_version
+                    .clone()
+                    .or_else(|| package.manifest.version.clone())
+                    .ok_or("model package has no version")?;
+                catalog
+                    .resolve(&ModelReference::id(package.manifest.id, Some(version)))
+                    .await?
+            } else {
+                catalog
+                    .resolve(&ModelReference::id(
+                        model.clone(),
+                        model
+                            .split_once('@')
+                            .and_then(|(_, version)| Some(version.to_owned())),
+                    ))
+                    .await?
+            };
+            let package = ModelPackage::open(&descriptor.package_path)
                 .map_err(|error| format!("open model package: {error}"))?;
-            let runtime = build_runtime(None, None, false, false, None);
-            let selection = runtime.selection_for(&package.spec())?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "model": package.manifest.id,
+                        "identity": descriptor.id,
                         "format": package.manifest.format,
-                        "backend": selection.backend,
-                        "execution": selection.provider,
-                        "available": selection.backend.as_ref().and_then(|name| runtime
-                            .backends()
-                            .list()
-                            .iter()
-                            .find(|backend| &backend.name == name)
-                            .map(|backend| backend.available))
+                        "package_path": descriptor.package_path,
+                        "artifact": package.artifact,
+                        "inputs": package.manifest.inputs,
+                        "outputs": package.manifest.outputs,
+                        "validation": "valid"
                     }))?
                 );
             } else {
-                println!("Model: {}", package.manifest.id);
+                println!("Identity: {}", descriptor.id);
                 println!("Format: {:?}", package.manifest.format);
-                println!(
-                    "Backend: {}",
-                    selection.backend.as_deref().unwrap_or("none")
-                );
-                println!("Execution: {}", selection.provider);
+                println!("Package: {}", descriptor.package_path.display());
+                println!("Artifact: {}", package.artifact.display());
+                println!("Validation: valid");
             }
         }
         Commands::Run(args) => {

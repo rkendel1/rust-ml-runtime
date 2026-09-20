@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use ml_runtime::Runtime;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
-use ml_runtime_model::ModelPackage;
+use ml_runtime_model::{FilesystemModelCatalog, ModelCatalog};
 use ml_runtime_protocol::{
     CapabilitiesResponse, ErrorEnvelope, HealthResponse, InferRequest, InferResponse, ModelInfo,
     StreamInferResponse,
@@ -98,36 +98,24 @@ struct ServerState {
 }
 
 pub async fn serve(
-    runtime: Runtime,
+    mut runtime: Runtime,
     models_dir: impl AsRef<Path>,
     bind: impl AsRef<str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut models = Vec::new();
-    for entry in std::fs::read_dir(models_dir.as_ref())? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        match ModelPackage::open(entry.path()) {
-            Ok(package) => {
-                let spec = &package.manifest;
-                match runtime.load(package.spec()).await {
-                    Ok(_) => models.push(ModelInfo {
-                        id: spec.id.clone(),
-                        version: spec.model_version.clone().or_else(|| spec.version.clone()),
-                        format: spec.format.clone(),
-                        inputs: spec.inputs.clone(),
-                        outputs: spec.outputs.clone(),
-                        metadata: spec.metadata.clone(),
-                    }),
-                    Err(error) => {
-                        eprintln!("skipping unavailable model package {}: {error}", spec.id)
-                    }
-                }
-            }
-            Err(error) => eprintln!("skipping invalid model package: {error}"),
-        }
-    }
+    let catalog = FilesystemModelCatalog::new(models_dir.as_ref().to_path_buf());
+    let descriptors = catalog.list().await?;
+    let models = descriptors
+        .iter()
+        .map(|descriptor| ModelInfo {
+            id: descriptor.id.name.clone(),
+            version: Some(descriptor.id.version.clone()),
+            format: descriptor.format.clone(),
+            inputs: descriptor.manifest.inputs.clone(),
+            outputs: descriptor.manifest.outputs.clone(),
+            metadata: descriptor.manifest.metadata.clone(),
+        })
+        .collect();
+    runtime.set_catalog(catalog);
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities))
