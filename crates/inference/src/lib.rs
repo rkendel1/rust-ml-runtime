@@ -116,6 +116,16 @@ pub struct ExecutionMetadata {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub hardware: Option<String>,
+    #[serde(default)]
+    pub cache_hit: bool,
+    #[serde(default)]
+    pub batch_size: usize,
+    #[serde(default)]
+    pub queue_wait_ms: Option<f64>,
+    #[serde(default)]
+    pub model_load_ms: Option<f64>,
+    #[serde(default)]
+    pub execution_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

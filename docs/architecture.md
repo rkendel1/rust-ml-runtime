@@ -47,6 +47,17 @@ or `RemoteThenLocal`. The runtime first checks registered capabilities and
 uses stable registration/name ordering; backend selection happens only after
 the local target has been selected.
 
+Model artifacts are immutable application inputs; a loaded model is an
+ephemeral runtime resource. Explicit `Runtime::load` returns a runtime-owned
+handle, and lazy inference reuses the bounded, target-aware in-memory cache.
+The execution order is `routing -> lifecycle -> scheduling -> batching ->
+execution`; cache state is not authoritative application state.
+
+`Runtime::infer_batch` preserves request order and result identity. Backends
+that do not advertise batching continue to receive individual requests.
+`Runtime::status` and the `ml-runtime status` command expose generic resource
+state without exposing backend-private objects.
+
 Fallback is policy-controlled, deterministic, and observable. Provider,
 backend, timeout, transport, and model-availability failures may permit
 fallback, while invalid inputs and contract violations never do. Every result

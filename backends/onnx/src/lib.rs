@@ -48,6 +48,8 @@ impl Backend for OnnxBackend {
             cancellation: true,
             structured_output: false,
             batching: true,
+            max_batch_size: Some(16),
+            supported_batch_shapes: Vec::new(),
             supported_formats: vec![ModelFormat::Onnx],
             accelerators: Vec::new(),
             hardware: Some("cpu".to_owned()),

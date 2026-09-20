@@ -27,6 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Models,
+    Status,
     Providers,
     Backends,
     Capabilities {
@@ -91,6 +92,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{} ({:?}) via {:?}", model.id, model.format, model.backend);
                 }
             }
+        }
+        Commands::Status => {
+            let runtime = build_runtime(None, None, false, false, None);
+            let status = runtime.status();
+            println!("Loaded models: {}", status.loaded_models);
+            println!(
+                "Model cache: {} / {}",
+                status.loaded_models, status.max_models
+            );
+            println!(
+                "Concurrent inference: 0 / {}",
+                status.max_concurrent_inferences
+            );
         }
         Commands::Providers => {
             let runtime = build_runtime(None, None, false, false, None);

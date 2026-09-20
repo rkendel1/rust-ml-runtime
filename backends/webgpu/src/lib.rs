@@ -28,6 +28,8 @@ impl Backend for WebgpuBackend {
             cancellation: false,
             structured_output: false,
             batching: false,
+            max_batch_size: None,
+            supported_batch_shapes: Vec::new(),
             supported_formats: vec![ModelFormat::Unknown],
             accelerators: vec!["webgpu".to_owned()],
             hardware: Some("webgpu".to_owned()),

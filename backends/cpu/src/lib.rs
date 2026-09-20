@@ -90,6 +90,8 @@ impl Backend for CpuBackend {
             cancellation: true,
             structured_output: true,
             batching: true,
+            max_batch_size: Some(16),
+            supported_batch_shapes: Vec::new(),
             supported_formats: vec![
                 ModelFormat::Onnx,
                 ModelFormat::CoreMl,

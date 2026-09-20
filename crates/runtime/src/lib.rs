@@ -9,7 +9,11 @@ use ml_runtime_provider::{Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, RwLock},
+    hash::{Hash, Hasher},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::{sync::Semaphore, time::timeout};
@@ -63,6 +67,24 @@ pub struct RuntimeCapabilities {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeStatus {
+    pub loaded_models: usize,
+    pub max_models: usize,
+    pub max_concurrent_inferences: usize,
+    pub max_concurrent_model_loads: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ModelLifecycleState {
+    Discovered,
+    Validated,
+    Loaded,
+    Ready,
+    InUse,
+    Evicted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub selected_backend: Option<String>,
     pub selected_provider: Option<String>,
@@ -71,6 +93,10 @@ pub struct RuntimeConfig {
     pub timeout_ms: Option<u64>,
     pub max_concurrency: usize,
     pub max_batch_size: Option<usize>,
+    pub max_concurrent_inferences: usize,
+    pub max_concurrent_model_loads: usize,
+    pub max_models: usize,
+    pub max_memory_bytes: Option<u64>,
 }
 
 impl Default for RuntimeConfig {
@@ -83,6 +109,10 @@ impl Default for RuntimeConfig {
             timeout_ms: None,
             max_concurrency: 4,
             max_batch_size: Some(16),
+            max_concurrent_inferences: 4,
+            max_concurrent_model_loads: 1,
+            max_models: 8,
+            max_memory_bytes: None,
         }
     }
 }
@@ -138,6 +168,60 @@ struct LoadedModel {
     handle: ModelHandle,
     backend_name: String,
     provider_name: String,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RuntimeModelHandle {
+    model_id: String,
+    version: Option<String>,
+    provider: String,
+    backend: String,
+    state: ModelLifecycleState,
+}
+
+impl RuntimeModelHandle {
+    pub fn id(&self) -> &str {
+        &self.model_id
+    }
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+    pub fn state(&self) -> &ModelLifecycleState {
+        &self.state
+    }
+}
+
+#[derive(Clone, Debug, Eq)]
+struct ModelCacheKey {
+    id: String,
+    version: Option<String>,
+    provider: String,
+    backend: String,
+}
+
+impl PartialEq for ModelCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.version == other.version
+            && self.provider == other.provider
+            && self.backend == other.backend
+    }
+}
+
+impl Hash for ModelCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.version.hash(state);
+        self.provider.hash(state);
+        self.backend.hash(state);
+    }
 }
 
 pub struct RuntimeBuilder {
@@ -184,6 +268,28 @@ impl RuntimeBuilder {
 
     pub fn concurrency(mut self, max_concurrency: usize) -> Self {
         self.config.max_concurrency = max_concurrency.max(1);
+        self.config.max_concurrent_inferences = max_concurrency.max(1);
+        self
+    }
+
+    pub fn max_concurrent_inferences(mut self, limit: usize) -> Self {
+        self.config.max_concurrent_inferences = limit.max(1);
+        self.config.max_concurrency = limit.max(1);
+        self
+    }
+
+    pub fn max_concurrent_model_loads(mut self, limit: usize) -> Self {
+        self.config.max_concurrent_model_loads = limit.max(1);
+        self
+    }
+
+    pub fn max_models(mut self, limit: usize) -> Self {
+        self.config.max_models = limit.max(1);
+        self
+    }
+
+    pub fn max_memory_bytes(mut self, limit: u64) -> Self {
+        self.config.max_memory_bytes = Some(limit);
         self
     }
 
@@ -226,7 +332,13 @@ impl RuntimeBuilder {
             backends: self.backends,
             providers: self.providers,
             loaded_models: RwLock::new(HashMap::new()),
-            semaphore: Arc::new(Semaphore::new(self.config.max_concurrency.max(1))),
+            inference_semaphore: Arc::new(Semaphore::new(
+                self.config.max_concurrent_inferences.max(1),
+            )),
+            load_semaphore: Arc::new(Semaphore::new(
+                self.config.max_concurrent_model_loads.max(1),
+            )),
+            cache_clock: AtomicU64::new(0),
         }
     }
 }
@@ -235,8 +347,10 @@ pub struct Runtime {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
-    loaded_models: RwLock<HashMap<String, LoadedModel>>,
-    semaphore: Arc<Semaphore>,
+    loaded_models: RwLock<HashMap<ModelCacheKey, LoadedModel>>,
+    inference_semaphore: Arc<Semaphore>,
+    load_semaphore: Arc<Semaphore>,
+    cache_clock: AtomicU64,
 }
 
 impl Runtime {
@@ -297,6 +411,19 @@ impl Runtime {
         }
     }
 
+    pub fn status(&self) -> RuntimeStatus {
+        RuntimeStatus {
+            loaded_models: self
+                .loaded_models
+                .read()
+                .expect("loaded model registry poisoned")
+                .len(),
+            max_models: self.config.max_models,
+            max_concurrent_inferences: self.config.max_concurrent_inferences,
+            max_concurrent_model_loads: self.config.max_concurrent_model_loads,
+        }
+    }
+
     pub fn selection_for(&self, model: &ModelSpec) -> RuntimeResult<RuntimeSelection> {
         let backend_name = self.select_backend(model)?;
         let backend = self
@@ -315,7 +442,7 @@ impl Runtime {
         })
     }
 
-    pub async fn load(&self, model: ModelSpec) -> RuntimeResult<ModelHandle> {
+    pub async fn load(&self, model: ModelSpec) -> RuntimeResult<RuntimeModelHandle> {
         if self
             .config
             .selected_provider
@@ -331,12 +458,34 @@ impl Runtime {
             ));
         }
 
+        let backend_name = self.select_backend(&model)?;
+        let key = ModelCacheKey {
+            id: model.id.clone(),
+            version: model.version.clone(),
+            provider: "local".to_owned(),
+            backend: backend_name.clone(),
+        };
+        if let Some(existing) = self
+            .loaded_models
+            .read()
+            .expect("loaded model registry poisoned")
+            .get(&key)
+        {
+            return Ok(runtime_handle(existing));
+        }
         let _permit = self
-            .semaphore
+            .load_semaphore
             .acquire()
             .await
-            .map_err(|_| RuntimeError::execution("load", "runtime semaphore closed"))?;
-        let backend_name = self.select_backend(&model)?;
+            .map_err(|_| RuntimeError::execution("load", "runtime load semaphore closed"))?;
+        if let Some(existing) = self
+            .loaded_models
+            .read()
+            .expect("loaded model registry poisoned")
+            .get(&key)
+        {
+            return Ok(runtime_handle(existing));
+        }
         let backend = self
             .backends
             .get(&backend_name)
@@ -345,24 +494,146 @@ impl Runtime {
         let timeout_ms = self.config.timeout_ms;
         let handle = run_with_timeout(timeout_ms, "load", backend.load(&model)).await?;
 
-        self.loaded_models
+        let mut cache = self
+            .loaded_models
             .write()
-            .expect("loaded model registry poisoned")
-            .insert(
-                model.id.clone(),
-                LoadedModel {
-                    spec: model,
-                    handle: handle.clone(),
-                    backend_name,
-                    provider_name: "local".to_owned(),
-                },
-            );
-        Ok(handle)
+            .expect("loaded model registry poisoned");
+        if cache.len() >= self.config.max_models {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, model)| model.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        let loaded = LoadedModel {
+            spec: model,
+            handle,
+            backend_name,
+            provider_name: "local".to_owned(),
+            last_used: self.cache_clock.fetch_add(1, Ordering::Relaxed),
+        };
+        let runtime_handle = runtime_handle(&loaded);
+        cache.insert(key, loaded);
+        Ok(runtime_handle)
+    }
+
+    pub async fn load_reference(
+        &self,
+        reference: ModelReference,
+    ) -> RuntimeResult<RuntimeModelHandle> {
+        match reference {
+            ModelReference::Spec(spec) => self.load(spec).await,
+            ModelReference::Id { id, version } => self
+                .find_loaded(&id, version.as_ref())
+                .map(|loaded| runtime_handle(&loaded)),
+        }
     }
 
     pub async fn infer(&self, request: InferenceRequest) -> RuntimeResult<InferenceResult> {
         self.infer_with_cancellation(request, CancellationToken::new())
             .await
+    }
+
+    pub async fn infer_loaded(
+        &self,
+        model: &RuntimeModelHandle,
+        input: Input,
+        options: InferenceOptions,
+    ) -> RuntimeResult<InferenceResult> {
+        self.infer(InferenceRequest {
+            model: ModelReference::id(model.id().to_owned(), model.version().map(str::to_owned)),
+            input,
+            options,
+        })
+        .await
+    }
+
+    pub async fn infer_batch(
+        &self,
+        requests: Vec<InferenceRequest>,
+    ) -> RuntimeResult<Vec<InferenceResult>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(limit) = self.config.max_batch_size {
+            if requests.len() > limit {
+                return Err(RuntimeError::ResourceLimit {
+                    reason: format!(
+                        "batch size {} exceeds configured limit {limit}",
+                        requests.len()
+                    ),
+                });
+            }
+        }
+        for request in &requests {
+            self.validate_request(request)?;
+        }
+        let selection = self.select_for_request(&requests[0])?;
+        let same_model = requests
+            .iter()
+            .all(|request| model_id(&request.model) == model_id(&requests[0].model));
+        if selection.provider != "local" || !same_model {
+            return futures_util::future::try_join_all(
+                requests.into_iter().map(|request| self.infer(request)),
+            )
+            .await;
+        }
+        let loaded = self.resolve_loaded_model(&requests[0].model).await?;
+        let backend = self
+            .backends
+            .get(&loaded.backend_name)
+            .ok_or_else(|| {
+                RuntimeError::backend_unavailable(&loaded.backend_name, "not registered")
+            })?
+            .clone();
+        if !backend.capabilities().batching {
+            return futures_util::future::try_join_all(
+                requests.into_iter().map(|request| self.infer(request)),
+            )
+            .await;
+        }
+        let _permit = self.inference_semaphore.acquire().await.map_err(|_| {
+            RuntimeError::execution("infer_batch", "runtime inference semaphore closed")
+        })?;
+        let batch_size = requests.len();
+        let mut results = run_with_timeout(
+            self.config.timeout_ms,
+            "infer_batch",
+            backend.infer_batch(&loaded.handle, &requests, Some(CancellationToken::new())),
+        )
+        .await?;
+        if results.len() != batch_size {
+            return Err(RuntimeError::execution(
+                "infer_batch",
+                format!(
+                    "backend returned {} results for {batch_size} requests",
+                    results.len()
+                ),
+            ));
+        }
+        for (result, request) in results.iter_mut().zip(requests.iter()) {
+            let output = result.output.clone();
+            decorate_metadata(
+                &mut result.metadata,
+                &output,
+                &loaded.spec.id,
+                "local",
+                &loaded.backend_name,
+                backend.capabilities().hardware.clone(),
+                Duration::ZERO,
+                estimate_input_tokens(&request.input),
+                loaded.spec.version.clone(),
+                selection.policy.clone(),
+                false,
+                None,
+                Some(selection.reason.clone()),
+            );
+            result.metadata.batch_size = batch_size;
+            result.metadata.cache_hit = true;
+        }
+        Ok(results)
     }
 
     pub async fn infer_with_cancellation(
@@ -375,11 +646,11 @@ impl Runtime {
             return Err(RuntimeError::Cancelled);
         }
 
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| RuntimeError::execution("infer", "runtime semaphore closed"))?;
+        let _permit = tokio::select! {
+            permit = self.inference_semaphore.acquire() => permit
+                .map_err(|_| RuntimeError::execution("infer", "runtime inference semaphore closed"))?,
+            _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+        };
 
         let mut selection = self.select_for_request(&request)?;
         let timeout_ms = request.options.timeout_ms.or(self.config.timeout_ms);
@@ -387,6 +658,7 @@ impl Runtime {
 
         match selection.provider.as_str() {
             "local" => {
+                let cache_hit = self.is_loaded(&request.model);
                 let loaded = match self.resolve_loaded_model(&request.model).await {
                     Ok(loaded) => loaded,
                     Err(error) if self.can_fallback(&request, &selection, &error) => {
@@ -460,6 +732,7 @@ impl Runtime {
                     selection.fallback_from.clone(),
                     Some(selection.reason.clone()),
                 );
+                result.metadata.cache_hit = cache_hit;
                 Ok(result)
             }
             _ => {
@@ -578,39 +851,50 @@ impl Runtime {
 
     async fn resolve_loaded_model(&self, reference: &ModelReference) -> RuntimeResult<LoadedModel> {
         match reference {
-            ModelReference::Id { id, version } => self
-                .loaded_models
-                .read()
-                .expect("loaded model registry poisoned")
-                .get(id)
-                .cloned()
-                .filter(|loaded| {
-                    version
-                        .as_ref()
-                        .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
-                })
-                .ok_or_else(|| RuntimeError::ModelNotFound { model: id.clone() }),
+            ModelReference::Id { id, version } => self.find_loaded(id, version.as_ref()),
             ModelReference::Spec(spec) => {
-                if let Some(existing) = self
-                    .loaded_models
-                    .read()
-                    .expect("loaded model registry poisoned")
-                    .get(&spec.id)
-                    .cloned()
-                {
+                if let Some(existing) = self.find_loaded(&spec.id, spec.version.as_ref()).ok() {
                     return Ok(existing);
                 }
                 self.load(spec.clone()).await?;
-                self.loaded_models
-                    .read()
-                    .expect("loaded model registry poisoned")
-                    .get(&spec.id)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::ModelNotFound {
-                        model: spec.id.clone(),
-                    })
+                self.find_loaded(&spec.id, spec.version.as_ref())
             }
         }
+    }
+
+    fn find_loaded(&self, id: &str, version: Option<&String>) -> RuntimeResult<LoadedModel> {
+        let mut cache = self
+            .loaded_models
+            .write()
+            .expect("loaded model registry poisoned");
+        let found = cache.iter_mut().find(|(key, loaded)| {
+            key.id == id
+                && version.map_or(true, |version| {
+                    loaded.spec.version.as_ref() == Some(version)
+                })
+        });
+        if let Some((_, loaded)) = found {
+            loaded.last_used = self.cache_clock.fetch_add(1, Ordering::Relaxed);
+            return Ok(loaded.clone());
+        }
+
+        Err(RuntimeError::ModelNotFound {
+            model: id.to_owned(),
+        })
+    }
+
+    fn is_loaded(&self, reference: &ModelReference) -> bool {
+        let (id, version) = model_details(reference);
+        self.loaded_models
+            .read()
+            .expect("loaded model registry poisoned")
+            .keys()
+            .any(|key| {
+                key.id == id
+                    && version
+                        .as_ref()
+                        .map_or(true, |v| key.version.as_ref() == Some(v))
+            })
     }
 
     fn select_for_request(&self, request: &InferenceRequest) -> RuntimeResult<RuntimeSelection> {
@@ -668,18 +952,7 @@ impl Runtime {
     ) -> RuntimeResult<RuntimeSelection> {
         match reference {
             ModelReference::Id { id, version } => {
-                let loaded = self
-                    .loaded_models
-                    .read()
-                    .expect("loaded model registry poisoned")
-                    .get(id)
-                    .cloned()
-                    .filter(|loaded| {
-                        version
-                            .as_ref()
-                            .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
-                    })
-                    .ok_or_else(|| RuntimeError::ModelNotFound { model: id.clone() })?;
+                let loaded = self.find_loaded(id, version.as_ref())?;
                 Ok(RuntimeSelection {
                     model: loaded.spec.id,
                     provider: "local".to_owned(),
@@ -863,6 +1136,16 @@ fn model_id(reference: &ModelReference) -> String {
     }
 }
 
+fn runtime_handle(loaded: &LoadedModel) -> RuntimeModelHandle {
+    RuntimeModelHandle {
+        model_id: loaded.spec.id.clone(),
+        version: loaded.spec.version.clone(),
+        provider: loaded.provider_name.clone(),
+        backend: loaded.backend_name.clone(),
+        state: ModelLifecycleState::Ready,
+    }
+}
+
 fn model_details(reference: &ModelReference) -> (String, Option<String>) {
     match reference {
         ModelReference::Id { id, version } => (id.clone(), version.clone()),
@@ -912,6 +1195,7 @@ fn decorate_metadata(
     metadata.fallback_reason = fallback_reason;
     metadata.hardware = hardware;
     metadata.latency_ms = Some(elapsed.as_secs_f64() * 1000.0);
+    metadata.execution_ms = metadata.latency_ms;
     metadata.input_tokens = input_tokens;
     metadata.output_tokens = estimate_output_tokens(output);
 }
@@ -1214,5 +1498,79 @@ mod tests {
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.output, Output::Text("remote-model".to_owned()));
         assert!(chunk.done);
+    }
+
+    #[tokio::test]
+    async fn explicit_handles_reuse_loaded_models_and_report_cache_hits() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let model = ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory);
+        let handle = runtime.load(model).await.unwrap();
+        assert_eq!(handle.id(), "echo");
+        let result = runtime
+            .infer_loaded(
+                &handle,
+                Input::Text("cached".to_owned()),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result.metadata.cache_hit);
+        assert_eq!(runtime.models().list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_evicts_the_least_recently_used_target() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .max_models(1)
+            .build();
+        runtime
+            .load(ModelSpec::new(
+                "first",
+                ModelFormat::Unknown,
+                ModelLocation::Memory,
+            ))
+            .await
+            .unwrap();
+        runtime
+            .load(ModelSpec::new(
+                "second",
+                ModelFormat::Unknown,
+                ModelLocation::Memory,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(runtime.models().list().len(), 1);
+        assert_eq!(runtime.models().list()[0].id, "second");
+    }
+
+    #[tokio::test]
+    async fn batch_inference_preserves_result_order_and_identity() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let model = ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory);
+        let results = runtime
+            .infer_batch(vec![
+                InferenceRequest {
+                    model: model.clone().into(),
+                    input: Input::Text("a".to_owned()),
+                    options: Default::default(),
+                },
+                InferenceRequest {
+                    model: model.into(),
+                    input: Input::Text("b".to_owned()),
+                    options: Default::default(),
+                },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].output, Output::Text("a".to_owned()));
+        assert_eq!(results[1].output, Output::Text("b".to_owned()));
+        assert_eq!(results[0].metadata.batch_size, 2);
+        assert_eq!(results[1].metadata.batch_size, 2);
     }
 }
