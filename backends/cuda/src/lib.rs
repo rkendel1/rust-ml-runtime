@@ -28,6 +28,8 @@ impl Backend for CudaBackend {
             cancellation: false,
             structured_output: false,
             batching: false,
+            max_batch_size: None,
+            supported_batch_shapes: Vec::new(),
             supported_formats: vec![ModelFormat::Unknown],
             accelerators: vec!["cuda".to_owned()],
             hardware: Some("cuda".to_owned()),

@@ -12,6 +12,8 @@ pub struct BackendCapabilities {
     pub cancellation: bool,
     pub structured_output: bool,
     pub batching: bool,
+    pub max_batch_size: Option<usize>,
+    pub supported_batch_shapes: Vec<Vec<usize>>,
     pub supported_formats: Vec<ModelFormat>,
     pub accelerators: Vec<String>,
     pub hardware: Option<String>,
@@ -27,6 +29,8 @@ pub struct BackendCapability {
     pub cancellation: bool,
     pub structured_output: bool,
     pub batching: bool,
+    pub max_batch_size: Option<usize>,
+    pub supported_batch_shapes: Vec<Vec<usize>>,
     pub supported_formats: Vec<ModelFormat>,
     pub accelerators: Vec<String>,
     pub hardware: Option<String>,
@@ -43,6 +47,8 @@ impl BackendCapability {
             cancellation: capabilities.cancellation,
             structured_output: capabilities.structured_output,
             batching: capabilities.batching,
+            max_batch_size: capabilities.max_batch_size,
+            supported_batch_shapes: capabilities.supported_batch_shapes,
             supported_formats: capabilities.supported_formats,
             accelerators: capabilities.accelerators,
             hardware: capabilities.hardware,
@@ -63,6 +69,18 @@ pub trait Backend: Send + Sync {
         request: &InferenceRequest,
         cancellation: Option<CancellationToken>,
     ) -> RuntimeResult<InferenceResult>;
+    async fn infer_batch(
+        &self,
+        model: &ModelHandle,
+        requests: &[InferenceRequest],
+        cancellation: Option<CancellationToken>,
+    ) -> RuntimeResult<Vec<InferenceResult>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            results.push(self.infer(model, request, cancellation.clone()).await?);
+        }
+        Ok(results)
+    }
     async fn infer_stream(
         &self,
         model: &ModelHandle,

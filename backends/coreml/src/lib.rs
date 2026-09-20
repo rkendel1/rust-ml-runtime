@@ -188,6 +188,8 @@ impl Backend for CoreMlBackend {
             cancellation: false,
             structured_output: false,
             batching: false,
+            max_batch_size: None,
+            supported_batch_shapes: Vec::new(),
             supported_formats: vec![ModelFormat::CoreMl],
             accelerators: if cfg!(target_os = "macos") {
                 vec!["ane".to_owned(), "gpu".to_owned(), "cpu".to_owned()]
