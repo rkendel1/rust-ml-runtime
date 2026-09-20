@@ -301,11 +301,7 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::backend_unavailable(&backend_name, "not registered"))?;
         Ok(RuntimeSelection {
             model: model.id.clone(),
-            provider: self
-                .config
-                .selected_provider
-                .clone()
-                .unwrap_or_else(|| "local".to_owned()),
+            provider: "local".to_owned(),
             backend: Some(backend_name),
             hardware: backend.capabilities().hardware,
             fallback: false,
@@ -313,6 +309,21 @@ impl Runtime {
     }
 
     pub async fn load(&self, model: ModelSpec) -> RuntimeResult<ModelHandle> {
+        if self
+            .config
+            .selected_provider
+            .as_deref()
+            .is_some_and(|provider| provider != "local")
+        {
+            return Err(RuntimeError::provider_unavailable(
+                self.config
+                    .selected_provider
+                    .clone()
+                    .unwrap_or_else(|| "remote".to_owned()),
+                "load is only supported for local execution paths",
+            ));
+        }
+
         let _permit = self
             .semaphore
             .acquire()
@@ -442,6 +453,11 @@ impl Runtime {
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceStream> {
         self.validate_request(&request)?;
+        if !request.options.stream {
+            return Err(RuntimeError::CapabilityMismatch {
+                reason: "infer_stream requires InferenceOptions::stream to be true".to_owned(),
+            });
+        }
         let selection = self.select_for_request(&request)?;
         match selection.provider.as_str() {
             "local" => {
@@ -876,7 +892,10 @@ mod tests {
             .infer(InferenceRequest {
                 model: ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory).into(),
                 input: Input::Tokens(vec![1, 2, 3]),
-                options: InferenceOptions::default(),
+                options: InferenceOptions {
+                    batch_size: Some(3),
+                    ..InferenceOptions::default()
+                },
             })
             .await
             .unwrap_err();
@@ -906,6 +925,50 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RuntimeError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn streams_from_local_backend() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+
+        let mut stream = runtime
+            .infer_stream(InferenceRequest {
+                model: ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory).into(),
+                input: Input::Text("hello runtime".to_owned()),
+                options: InferenceOptions {
+                    stream: true,
+                    ..InferenceOptions::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let first = stream.next().await.unwrap().unwrap();
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.output, Output::Text("hello".to_owned()));
+        assert_eq!(second.output, Output::Text("runtime".to_owned()));
+        assert!(second.done);
+    }
+
+    #[tokio::test]
+    async fn rejects_stream_calls_without_stream_flag() {
+        let runtime = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .build();
+        let result = runtime
+            .infer_stream(InferenceRequest {
+                model: ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory).into(),
+                input: Input::Text("hello".to_owned()),
+                options: InferenceOptions::default(),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 
     #[tokio::test]

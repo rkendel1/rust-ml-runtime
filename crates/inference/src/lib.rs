@@ -58,7 +58,7 @@ pub enum Input {
 impl Input {
     pub fn batch_size(&self) -> usize {
         match self {
-            Self::Tokens(values) => values.len().max(1),
+            Self::Tokens(_) => 1,
             Self::Tensor(tensor) => tensor.shape.first().copied().unwrap_or(1),
             _ => 1,
         }
