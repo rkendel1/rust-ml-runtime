@@ -1,7 +1,8 @@
 use ml_runtime_backend::{Backend, BackendCapability};
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_inference::{
-    ExecutionMetadata, InferenceChunk, InferenceRequest, InferenceResult, Input, Output,
+    ExecutionMetadata, ExecutionPolicy, InferenceChunk, InferenceOptions, InferenceRequest,
+    InferenceResult, Input, Output,
 };
 use ml_runtime_model::{ModelFormat, ModelHandle, ModelLocation, ModelReference, ModelSpec};
 use ml_runtime_provider::{Provider, ProviderCapability};
@@ -93,6 +94,9 @@ pub struct RuntimeSelection {
     pub backend: Option<String>,
     pub hardware: Option<String>,
     pub fallback: bool,
+    pub fallback_from: Option<String>,
+    pub reason: String,
+    pub policy: ExecutionPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -305,6 +309,9 @@ impl Runtime {
             backend: Some(backend_name),
             hardware: backend.capabilities().hardware,
             fallback: false,
+            fallback_from: None,
+            reason: "preferred local execution".to_owned(),
+            policy: ExecutionPolicy::LocalOnly,
         })
     }
 
@@ -374,13 +381,33 @@ impl Runtime {
             .await
             .map_err(|_| RuntimeError::execution("infer", "runtime semaphore closed"))?;
 
-        let selection = self.select_for_request(&request)?;
+        let mut selection = self.select_for_request(&request)?;
         let timeout_ms = request.options.timeout_ms.or(self.config.timeout_ms);
         let input_tokens = estimate_input_tokens(&request.input);
 
         match selection.provider.as_str() {
             "local" => {
-                let loaded = self.resolve_loaded_model(&request.model).await?;
+                let loaded = match self.resolve_loaded_model(&request.model).await {
+                    Ok(loaded) => loaded,
+                    Err(error) if self.can_fallback(&request, &selection, &error) => {
+                        selection = self.remote_selection(
+                            model_id(&request.model),
+                            true,
+                            Some("local model unavailable".to_owned()),
+                            &request.options,
+                        )?;
+                        return self
+                            .infer_remote(
+                                request,
+                                cancellation,
+                                timeout_ms,
+                                input_tokens,
+                                selection,
+                            )
+                            .await;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let backend = self
                     .backends
                     .get(&loaded.backend_name)
@@ -389,12 +416,33 @@ impl Runtime {
                     })?
                     .clone();
                 let started = Instant::now();
-                let mut result = run_with_timeout(
+                let result = run_with_timeout(
                     timeout_ms,
                     "infer",
                     backend.infer(&loaded.handle, &request, Some(cancellation.clone())),
                 )
-                .await?;
+                .await;
+                let mut result = match result {
+                    Ok(result) => result,
+                    Err(error) if self.can_fallback(&request, &selection, &error) => {
+                        selection = self.remote_selection(
+                            model_id(&request.model),
+                            true,
+                            Some(error.to_string()),
+                            &request.options,
+                        )?;
+                        return self
+                            .infer_remote(
+                                request,
+                                cancellation,
+                                timeout_ms,
+                                input_tokens,
+                                selection,
+                            )
+                            .await;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let capabilities = backend.capabilities();
                 let output = result.output.clone();
                 decorate_metadata(
@@ -406,40 +454,62 @@ impl Runtime {
                     capabilities.hardware,
                     started.elapsed(),
                     input_tokens,
+                    loaded.spec.version.clone(),
+                    selection.policy.clone(),
+                    selection.fallback,
+                    selection.fallback_from.clone(),
+                    Some(selection.reason.clone()),
                 );
                 Ok(result)
             }
-            provider_name => {
-                let provider = self
-                    .providers
-                    .get(provider_name)
-                    .ok_or_else(|| {
-                        RuntimeError::provider_unavailable(provider_name, "not registered")
-                    })?
-                    .clone();
-                let started = Instant::now();
-                let mut result = run_with_timeout(
-                    timeout_ms,
-                    "infer",
-                    provider.infer(request, Some(cancellation.clone())),
-                )
-                .await?;
-                let backend_name = result.metadata.backend.clone();
-                let hardware = result.metadata.hardware.clone();
-                let output = result.output.clone();
-                decorate_metadata(
-                    &mut result.metadata,
-                    &output,
-                    selection.model.as_str(),
-                    provider_name,
-                    backend_name.as_str(),
-                    hardware,
-                    started.elapsed(),
-                    input_tokens,
-                );
-                Ok(result)
+            _ => {
+                self.infer_remote(request, cancellation, timeout_ms, input_tokens, selection)
+                    .await
             }
         }
+    }
+
+    async fn infer_remote(
+        &self,
+        request: InferenceRequest,
+        cancellation: CancellationToken,
+        timeout_ms: Option<u64>,
+        input_tokens: Option<u64>,
+        selection: RuntimeSelection,
+    ) -> RuntimeResult<InferenceResult> {
+        let provider_name = selection.provider.as_str();
+        let provider = self
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| RuntimeError::provider_unavailable(provider_name, "not registered"))?
+            .clone();
+        let started = Instant::now();
+        let mut result = run_with_timeout(
+            timeout_ms,
+            "infer",
+            provider.infer(request.clone(), Some(cancellation)),
+        )
+        .await?;
+        let backend_name = result.metadata.backend.clone();
+        let hardware = result.metadata.hardware.clone();
+        let output = result.output.clone();
+        let (model, version) = model_details(&request.model);
+        decorate_metadata(
+            &mut result.metadata,
+            &output,
+            &model,
+            provider_name,
+            backend_name.as_str(),
+            hardware,
+            started.elapsed(),
+            input_tokens,
+            version,
+            selection.policy,
+            selection.fallback,
+            selection.fallback_from,
+            Some(selection.reason),
+        );
+        Ok(result)
     }
 
     pub async fn infer_stream(&self, request: InferenceRequest) -> RuntimeResult<InferenceStream> {
@@ -545,60 +615,112 @@ impl Runtime {
 
     fn select_for_request(&self, request: &InferenceRequest) -> RuntimeResult<RuntimeSelection> {
         let model_id = model_id(&request.model);
-
-        if request.options.require_remote {
-            return self.remote_selection(model_id, false);
+        let policy = if request.options.require_remote {
+            ExecutionPolicy::RemoteOnly
+        } else if request.options.require_local {
+            ExecutionPolicy::LocalOnly
+        } else if self.config.allow_remote_fallback {
+            ExecutionPolicy::LocalThenRemote
+        } else {
+            request.options.execution.clone()
+        };
+        match policy {
+            ExecutionPolicy::RemoteOnly => self.remote_selection(
+                model_id,
+                false,
+                Some("remote-only policy".to_owned()),
+                &request.options,
+            ),
+            ExecutionPolicy::LocalOnly => self.local_selection(&request.model, policy),
+            ExecutionPolicy::PreferLocal => match self
+                .local_selection(&request.model, policy.clone())
+            {
+                Ok(selection) => Ok(selection),
+                Err(error) => {
+                    self.remote_selection(model_id, true, Some(error.to_string()), &request.options)
+                }
+            },
+            ExecutionPolicy::LocalThenRemote => match self
+                .local_selection(&request.model, policy.clone())
+            {
+                Ok(selection) => Ok(selection),
+                Err(error) => {
+                    self.remote_selection(model_id, true, Some(error.to_string()), &request.options)
+                }
+            },
+            ExecutionPolicy::PreferRemote | ExecutionPolicy::RemoteThenLocal => match self
+                .remote_selection(
+                    model_id.clone(),
+                    false,
+                    Some("preferred remote execution".to_owned()),
+                    &request.options,
+                ) {
+                Ok(selection) => Ok(selection),
+                Err(_) => self.local_selection(&request.model, policy),
+            },
         }
+    }
 
-        if let Some(provider) = self.config.selected_provider.as_deref() {
-            if provider != "local" {
-                return self.remote_selection(model_id, false);
-            }
-        }
-
-        match &request.model {
+    fn local_selection(
+        &self,
+        reference: &ModelReference,
+        policy: ExecutionPolicy,
+    ) -> RuntimeResult<RuntimeSelection> {
+        match reference {
             ModelReference::Id { id, version } => {
                 let loaded = self
                     .loaded_models
                     .read()
                     .expect("loaded model registry poisoned")
                     .get(id)
-                    .cloned();
-                if let Some(loaded) = loaded.filter(|loaded| {
-                    version
-                        .as_ref()
-                        .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
-                }) {
-                    return Ok(RuntimeSelection {
-                        model: loaded.spec.id,
-                        provider: "local".to_owned(),
-                        backend: Some(loaded.backend_name.clone()),
-                        hardware: self
-                            .backends
-                            .get(&loaded.backend_name)
-                            .and_then(|backend| backend.capabilities().hardware),
-                        fallback: false,
-                    });
-                }
-                if self.config.allow_remote_fallback && !request.options.require_local {
-                    return self.remote_selection(model_id, true);
-                }
-                Err(RuntimeError::ModelNotFound { model: id.clone() })
+                    .cloned()
+                    .filter(|loaded| {
+                        version
+                            .as_ref()
+                            .is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
+                    })
+                    .ok_or_else(|| RuntimeError::ModelNotFound { model: id.clone() })?;
+                Ok(RuntimeSelection {
+                    model: loaded.spec.id,
+                    provider: "local".to_owned(),
+                    backend: Some(loaded.backend_name.clone()),
+                    hardware: self
+                        .backends
+                        .get(&loaded.backend_name)
+                        .and_then(|backend| backend.capabilities().hardware),
+                    fallback: false,
+                    fallback_from: None,
+                    reason: "preferred local execution".to_owned(),
+                    policy,
+                })
             }
-            ModelReference::Spec(spec) => match self.selection_for(spec) {
-                Ok(selection) => Ok(selection),
-                Err(err) if self.config.allow_remote_fallback && !request.options.require_local => {
-                    match self.remote_selection(model_id, true) {
-                        Ok(selection) => Ok(selection),
-                        Err(_) => Err(err),
-                    }
-                }
-                Err(err) => Err(err),
-            },
+            ModelReference::Spec(spec) => {
+                let backend = self.select_backend(spec)?;
+                let hardware = self
+                    .backends
+                    .get(&backend)
+                    .and_then(|b| b.capabilities().hardware);
+                Ok(RuntimeSelection {
+                    model: spec.id.clone(),
+                    provider: "local".to_owned(),
+                    backend: Some(backend),
+                    hardware,
+                    fallback: false,
+                    fallback_from: None,
+                    reason: "preferred local execution".to_owned(),
+                    policy,
+                })
+            }
         }
     }
 
-    fn remote_selection(&self, model: String, fallback: bool) -> RuntimeResult<RuntimeSelection> {
+    fn remote_selection(
+        &self,
+        model: String,
+        fallback: bool,
+        reason: Option<String>,
+        options: &InferenceOptions,
+    ) -> RuntimeResult<RuntimeSelection> {
         let selected = if let Some(provider_name) = self.config.selected_provider.as_deref() {
             if provider_name != "local" {
                 Some(provider_name.to_owned())
@@ -628,7 +750,31 @@ impl Runtime {
             backend: None,
             hardware: None,
             fallback,
+            fallback_from: fallback.then(|| "local".to_owned()),
+            reason: reason.unwrap_or_else(|| "remote execution selected by policy".to_owned()),
+            policy: options.execution.clone(),
         })
+    }
+
+    fn can_fallback(
+        &self,
+        request: &InferenceRequest,
+        selection: &RuntimeSelection,
+        error: &RuntimeError,
+    ) -> bool {
+        matches!(
+            selection.policy,
+            ExecutionPolicy::LocalThenRemote | ExecutionPolicy::PreferLocal
+        ) && !request.options.require_local
+            && matches!(
+                error,
+                RuntimeError::ProviderUnavailable { .. }
+                    | RuntimeError::BackendUnavailable { .. }
+                    | RuntimeError::ModelNotFound { .. }
+                    | RuntimeError::CapabilityMismatch { .. }
+                    | RuntimeError::Timeout { .. }
+                    | RuntimeError::Transport { .. }
+            )
     }
 
     fn select_backend(&self, model: &ModelSpec) -> RuntimeResult<String> {
@@ -713,6 +859,13 @@ fn model_id(reference: &ModelReference) -> String {
     }
 }
 
+fn model_details(reference: &ModelReference) -> (String, Option<String>) {
+    match reference {
+        ModelReference::Id { id, version } => (id.clone(), version.clone()),
+        ModelReference::Spec(spec) => (spec.id.clone(), spec.version.clone()),
+    }
+}
+
 fn estimate_input_tokens(input: &Input) -> Option<u64> {
     match input {
         Input::Text(text) => Some(text.split_whitespace().count() as u64),
@@ -738,10 +891,21 @@ fn decorate_metadata(
     hardware: Option<String>,
     elapsed: Duration,
     input_tokens: Option<u64>,
+    model_version: Option<String>,
+    routing_policy: ExecutionPolicy,
+    fallback: bool,
+    fallback_from: Option<String>,
+    fallback_reason: Option<String>,
 ) {
     metadata.model = model.to_owned();
+    metadata.model_version = model_version;
     metadata.provider = provider.to_owned();
     metadata.backend = backend.to_owned();
+    metadata.execution_target = provider.to_owned();
+    metadata.routing_policy = routing_policy;
+    metadata.fallback = fallback;
+    metadata.fallback_from = fallback_from;
+    metadata.fallback_reason = fallback_reason;
     metadata.hardware = hardware;
     metadata.latency_ms = Some(elapsed.as_secs_f64() * 1000.0);
     metadata.input_tokens = input_tokens;
@@ -888,6 +1052,48 @@ mod tests {
             .build();
         let result = hybrid.infer(request).await.unwrap();
         assert_eq!(result.metadata.provider, "mock-remote");
+        assert!(result.metadata.fallback);
+        assert_eq!(result.metadata.fallback_from.as_deref(), Some("local"));
+    }
+
+    #[tokio::test]
+    async fn explicit_policies_choose_deterministic_targets() {
+        let local = Runtime::builder()
+            .register_backend(CpuBackend::default())
+            .register_provider(MockRemoteProvider)
+            .build();
+        let model = ModelSpec::new("echo", ModelFormat::Unknown, ModelLocation::Memory);
+        local.load(model.clone()).await.unwrap();
+
+        let local_result = local
+            .infer(InferenceRequest {
+                model: model.clone().into(),
+                input: Input::Text("hello".to_owned()),
+                options: InferenceOptions {
+                    execution: ExecutionPolicy::PreferLocal,
+                    ..InferenceOptions::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(local_result.metadata.provider, "local");
+
+        let remote_result = local
+            .infer(InferenceRequest {
+                model: ModelReference::id("remote-model", None),
+                input: Input::Text("hello".to_owned()),
+                options: InferenceOptions {
+                    execution: ExecutionPolicy::PreferRemote,
+                    ..InferenceOptions::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(remote_result.metadata.provider, "mock-remote");
+        assert_eq!(
+            remote_result.metadata.routing_policy,
+            ExecutionPolicy::PreferRemote
+        );
     }
 
     #[tokio::test]

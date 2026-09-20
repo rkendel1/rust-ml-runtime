@@ -38,3 +38,17 @@ ml-runtime run --endpoint http://127.0.0.1:8080 --model example-linear@1 --tenso
 ```
 
 The versioned wire contract is defined in `crates/protocol` under `/v1`.
+
+## Hybrid routing
+
+`InferenceOptions::execution` is an explicit, runtime-owned policy:
+`LocalOnly`, `RemoteOnly`, `PreferLocal`, `PreferRemote`, `LocalThenRemote`,
+or `RemoteThenLocal`. The runtime first checks registered capabilities and
+uses stable registration/name ordering; backend selection happens only after
+the local target has been selected.
+
+Fallback is policy-controlled, deterministic, and observable. Provider,
+backend, timeout, transport, and model-availability failures may permit
+fallback, while invalid inputs and contract violations never do. Every result
+records the selected provider/backend, policy, target, model version, and any
+fallback transition in `ExecutionMetadata`.
