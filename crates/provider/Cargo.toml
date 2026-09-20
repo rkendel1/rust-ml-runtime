@@ -1,0 +1,11 @@
+[package]
+name = "ml-runtime-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ml-runtime-common = { path = "../common" }
+ml-runtime-inference = { path = "../inference" }
+serde.workspace = true

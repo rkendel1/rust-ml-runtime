@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "crates/common",
+  "crates/model",
+  "crates/inference",
+  "crates/backend",
+  "crates/provider",
+  "crates/runtime",
+  "crates/cli",
+  "backends/cpu",
+  "backends/coreml",
+  "backends/onnx",
+  "backends/cuda",
+  "backends/webgpu",
+  "providers/local",
+  "providers/http",
+  "providers/server",
+  "benchmarks",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+async-trait = "0.1"
+bytes = { version = "1", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+futures-core = "0.3"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
