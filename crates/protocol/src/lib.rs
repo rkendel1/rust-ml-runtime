@@ -1,4 +1,4 @@
-use ml_runtime_inference::{InferenceRequest, InferenceResult};
+use ml_runtime_inference::{InferenceRequest, InferenceResult, InferenceStreamEvent};
 use ml_runtime_model::{ModelFormat, ModelTensorSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -40,6 +40,28 @@ pub struct InferRequest {
 pub struct InferResponse {
     pub result: Option<InferenceResult>,
     pub error: Option<ErrorEnvelope>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct StreamInferResponse {
+    pub event: Option<InferenceStreamEvent>,
+    pub error: Option<ErrorEnvelope>,
+}
+
+impl StreamInferResponse {
+    pub fn event(event: InferenceStreamEvent) -> Self {
+        Self {
+            event: Some(event),
+            error: None,
+        }
+    }
+
+    pub fn error(error: ErrorEnvelope) -> Self {
+        Self {
+            event: None,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

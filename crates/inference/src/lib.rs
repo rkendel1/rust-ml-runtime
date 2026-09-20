@@ -103,6 +103,8 @@ pub enum Output {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionMetadata {
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub model: String,
     pub model_version: Option<String>,
     pub provider: String,
@@ -126,6 +128,14 @@ pub struct ExecutionMetadata {
     pub model_load_ms: Option<f64>,
     #[serde(default)]
     pub execution_ms: Option<f64>,
+    #[serde(default)]
+    pub streaming_requested: bool,
+    #[serde(default)]
+    pub streaming_supported: bool,
+    #[serde(default)]
+    pub output_event_count: usize,
+    #[serde(default)]
+    pub completion_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -146,4 +156,13 @@ pub struct InferenceChunk {
     pub output: Output,
     pub done: bool,
     pub metadata: Option<ExecutionMetadata>,
+}
+
+pub type InferenceOutput = Output;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum InferenceStreamEvent {
+    Started(ExecutionMetadata),
+    Output(InferenceOutput),
+    Completed(ExecutionMetadata),
 }

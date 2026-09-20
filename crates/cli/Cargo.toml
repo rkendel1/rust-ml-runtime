@@ -21,4 +21,5 @@ ml-runtime-onnx-backend = { path = "../../backends/onnx" }
 ml-runtime-server-provider = { path = "../../providers/server" }
 ml-runtime-webgpu-backend = { path = "../../backends/webgpu" }
 serde_json.workspace = true
+futures-util.workspace = true
 tokio.workspace = true
