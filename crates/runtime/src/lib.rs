@@ -32,6 +32,8 @@ pub use ml_runtime_inference;
 pub use ml_runtime_model;
 pub use ml_runtime_provider;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub type InferenceStream = BoxStream<RuntimeResult<InferenceStreamEvent>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1873,6 +1875,11 @@ mod tests {
     use ml_runtime_provider::{Provider, ProviderCapabilities};
     use serde_json::json;
     use tokio_stream::iter;
+
+    #[test]
+    fn runtime_version_is_workspace_version() {
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+    }
 
     #[derive(Clone)]
     struct MockRemoteProvider;
