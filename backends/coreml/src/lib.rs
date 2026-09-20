@@ -111,8 +111,9 @@ mod native {
             let data_type: usize = 65600; // MLMultiArrayDataTypeFloat32
             let data = values.as_ptr() as *mut c_void;
             let deallocator: *mut Object = std::ptr::null_mut();
+            let allocated: Id = msg_send![class!(MLMultiArray), alloc];
             let multi_array: Id = msg_send![
-                msg_send![class!(MLMultiArray), alloc],
+                allocated,
                 initWithDataPointer: data
                 shape: shape
                 dataType: data_type
