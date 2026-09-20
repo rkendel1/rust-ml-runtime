@@ -49,10 +49,13 @@ jobs:
           dir="ml-runtime-v${version}-${PLATFORM}"
           mkdir "$dir"
           cp "target/${TARGET}/release/ml-runtime" "$dir/"
+          mkdir -p "$dir/examples"
+          cp -R examples/models "$dir/examples/"
           cp LICENSE README.md "$dir/"
           tar -czf "${dir}.tar.gz" "$dir"
           "./${dir}/ml-runtime" --version
           "./${dir}/ml-runtime" doctor --models .
+          "./${dir}/ml-runtime" models
           "./${dir}/ml-runtime" run examples/models/linear --tensor 1,2 --shape 2
           sha256sum "${dir}.tar.gz" > "${dir}.sha256"
       - uses: actions/upload-artifact@v4
