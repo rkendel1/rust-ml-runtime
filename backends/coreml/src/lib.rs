@@ -131,8 +131,9 @@ mod native {
                 forKey: string(input_name)
             ];
             let mut error: Id = std::ptr::null_mut();
+            let allocated: Id = msg_send![class!(MLDictionaryFeatureProvider), alloc];
             let provider: Id = msg_send![
-                msg_send![class!(MLDictionaryFeatureProvider), alloc],
+                allocated,
                 initWithDictionary: dictionary
                 error: &mut error
             ];
@@ -159,7 +160,8 @@ mod native {
             let mut output_shape = Vec::with_capacity(dimension_count);
             for index in 0..dimension_count {
                 let dimension: Id = msg_send![dimensions, objectAtIndex: index];
-                output_shape.push(msg_send![dimension, unsignedLongLongValue] as usize);
+                let value: u64 = msg_send![dimension, unsignedLongLongValue];
+                output_shape.push(value as usize);
             }
             Ok((
                 output_shape,
