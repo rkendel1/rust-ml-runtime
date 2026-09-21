@@ -7,7 +7,8 @@ runtime crate, and the thin `@ml-runtime/core` TypeScript package.
 ## Install
 
 The most reproducible installation is a release archive from GitHub Releases.
-Archives contain `ml-runtime`, this README, and `LICENSE`. Verify downloads with:
+Archives contain `ml-runtime`, the example model catalog, this README, and
+`LICENSE`. Verify downloads with:
 
 ```sh
 shasum -a 256 -c SHA256SUMS

@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if backend.available { "✓" } else { "-" },
                             backend.name,
                             if backend.available {
-                                "available"
+                                "available".to_owned()
                             } else {
                                 backend.notes.join("; ")
                             }
@@ -515,17 +515,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         other => println!("{}", serde_json::to_string_pretty(&other)?),
                     }
 
-                    fn parse_execution_policy(value: &str) -> Result<ExecutionPolicy, String> {
-                        match value {
-                            "local-only" => Ok(ExecutionPolicy::LocalOnly),
-                            "remote-only" => Ok(ExecutionPolicy::RemoteOnly),
-                            "prefer-local" => Ok(ExecutionPolicy::PreferLocal),
-                            "prefer-remote" => Ok(ExecutionPolicy::PreferRemote),
-                            "local-then-remote" => Ok(ExecutionPolicy::LocalThenRemote),
-                            "remote-then-local" => Ok(ExecutionPolicy::RemoteThenLocal),
-                            _ => Err(format!("unsupported execution policy: {value}")),
-                        }
-                    }
                     println!(
                         "provider={} backend={} hardware={:?}",
                         result.metadata.provider, result.metadata.backend, result.metadata.hardware
@@ -593,6 +582,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn parse_execution_policy(value: &str) -> Result<ExecutionPolicy, String> {
+    match value {
+        "local-only" => Ok(ExecutionPolicy::LocalOnly),
+        "remote-only" => Ok(ExecutionPolicy::RemoteOnly),
+        "prefer-local" => Ok(ExecutionPolicy::PreferLocal),
+        "prefer-remote" => Ok(ExecutionPolicy::PreferRemote),
+        "local-then-remote" => Ok(ExecutionPolicy::LocalThenRemote),
+        "remote-then-local" => Ok(ExecutionPolicy::RemoteThenLocal),
+        _ => Err(format!("unsupported execution policy: {value}")),
+    }
 }
 
 fn build_runtime(
