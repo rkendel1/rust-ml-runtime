@@ -36,6 +36,29 @@ ml-runtime models install path/to/model-package --models models
 ml-runtime inspect example-linear@1 --models models
 ```
 
+For embedding, the canonical Rust surface is model + input + options → result:
+
+```rust
+use ml_runtime::{FilesystemModelCatalog, InferenceRequest, ModelReference, Runtime};
+
+let runtime = Runtime::builder()
+    .catalog(FilesystemModelCatalog::new("examples/models"))
+    .build();
+let request = InferenceRequest::new(ModelReference::versioned("mnist-8", "8"), input);
+let result = runtime.infer(request).await?;
+```
+
+Developer documentation is organized from usage toward implementation:
+
+1. [Quickstart and core API](docs/api.md#quickstart)
+2. [Models and lifecycle](docs/models.md)
+3. [Execution policies and metadata](docs/api.md#execution-policies-and-metadata)
+4. [Streaming](docs/api.md#streaming)
+5. [Batching](docs/api.md#batching)
+6. [Remote execution](docs/api.md#remote-execution)
+7. [Observability](docs/observability.md)
+8. [Architecture](docs/architecture.md)
+
 ## Release surface and compatibility
 
 The CLI and Rust API use the workspace version (`0.1.0` currently), exposed by
@@ -81,3 +104,94 @@ usage. `--json` changes output only, not exit-code semantics.
 
 See `docs/architecture.md`, `docs/models.md`, and `docs/bindings.md` for deeper
 implementation details.
+
+## Real model example
+
+The checked-in `mnist-8@8` package is the 26 KB pretrained MNIST convolutional
+network from the ONNX Model Zoo (MIT licensed, ONNX opset 8). Unlike
+`onnx-example`, which is a tiny deterministic operator fixture for CI,
+`mnist-8` was trained to classify handwritten digits and is the repository's
+first real pretrained model. Its artifact is pinned by size and SHA-256 in the
+authoritative manifest, so ordinary builds and tests never access the network.
+
+Build the runtime and inspect its capabilities and catalog:
+
+```sh
+cargo build --release -p ml-runtime-cli
+export PATH="$PWD/target/release:$PATH"
+ml-runtime capabilities
+ml-runtime models --models examples/models
+ml-runtime inspect mnist-8@8 --models examples/models
+ml-runtime models verify mnist-8@8 --models examples/models
+```
+
+The package can also pass through the normal verified local acquisition path;
+installation is explicit and performs no download:
+
+```sh
+ml-runtime models install examples/models/mnist-8 --models .local-models
+ml-runtime models verify mnist-8@8 --models .local-models
+```
+
+The model contract is `Input3: float32[1,1,28,28]` to
+`Plus214_Output_0: float32[1,10]`. Input is one 28×28 grayscale image with a
+black background, white foreground, and pixel values scaled to `[0,1]`. The
+output contains logits for digits 0 through 9; selecting the largest logit is
+the only postprocessing used here. Preprocessing remains application-owned.
+
+The prepared tensor in `examples/inputs/mnist-8-seven.csv` draws a seven and
+can be supplied directly to the existing general-purpose tensor flags:
+
+```sh
+MNIST_INPUT=$(tr -d '\n' < examples/inputs/mnist-8-seven.csv)
+ml-runtime run mnist-8@8 \
+  --models examples/models \
+  --backend onnx \
+  --tensor "$MNIST_INPUT" \
+  --shape 1,1,28,28 \
+  --verbose
+```
+
+The largest output logit is index 7 (approximately `25.5519`). Execution ends
+with `provider=local backend=onnx hardware=Some("cpu")`; small floating-point
+differences across ONNX Runtime builds are expected.
+
+To exercise the remote transport, keep the server in one terminal:
+
+```sh
+ml-runtime serve --bind 127.0.0.1:8080 --models examples/models
+```
+
+Then run the identity-only request from another terminal. `prefer-local` tells
+the server to resolve and execute its catalog model rather than forward it:
+
+```sh
+MNIST_INPUT=$(tr -d '\n' < examples/inputs/mnist-8-seven.csv)
+ml-runtime run mnist-8@8 \
+  --endpoint http://127.0.0.1:8080 \
+  --execution prefer-local \
+  --tensor "$MNIST_INPUT" \
+  --shape 1,1,28,28 \
+  --verbose
+```
+
+The client reports `provider=remote backend=onnx`: `remote` truthfully records
+the HTTP transport while `onnx` records the server's actual execution backend.
+The server-side integration test separately verifies `provider=local` and
+`backend=onnx` before the client decorates transport metadata.
+
+Establish a hardware-specific baseline without imposing a performance gate:
+
+```sh
+ml-runtime bench mnist-8@8 \
+  --models examples/models \
+  --backend onnx \
+  --tensor "$MNIST_INPUT" \
+  --shape 1,1,28,28 \
+  --iterations 20
+```
+
+The report includes model/version, provider, backend, execution target, model
+load time, iteration count, latency, and throughput. The equivalent public-API
+examples are runnable with `cargo run -p ml-runtime-cli --example mnist` and
+are also provided in `examples/typescript/mnist.ts` for `@ml-runtime/core`.

@@ -13,11 +13,11 @@ ml-runtime-common = { path = "../common" }
 ml-runtime-inference = { path = "../inference" }
 ml-runtime-model = { path = "../model" }
 ml-runtime-provider = { path = "../provider" }
+ml-runtime-cpu-backend = { path = "../../backends/cpu" }
+ml-runtime-http-provider = { path = "../../providers/http" }
+ml-runtime-onnx-backend = { path = "../../backends/onnx" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
-
-[dev-dependencies]
-ml-runtime-cpu-backend = { path = "../../backends/cpu" }

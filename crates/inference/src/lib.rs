@@ -3,6 +3,7 @@ use ml_runtime_model::ModelReference;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Determines where the runtime attempts to execute a request and whether it may fall back.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExecutionPolicy {
     #[default]
@@ -18,6 +19,15 @@ pub enum ExecutionPolicy {
 pub struct Tensor {
     pub shape: Vec<usize>,
     pub values: Vec<f32>,
+}
+
+impl Tensor {
+    pub fn new(shape: impl Into<Vec<usize>>, values: impl Into<Vec<f32>>) -> Self {
+        Self {
+            shape: shape.into(),
+            values: values.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,8 +117,12 @@ pub struct ExecutionMetadata {
     pub request_id: Option<String>,
     pub model: String,
     pub model_version: Option<String>,
+    /// Execution location or transport selected by this runtime (`local`, `remote`, etc.).
     pub provider: String,
+    /// Computation implementation reported by the execution target (`onnx`, `cpu`, etc.).
     pub backend: String,
+    /// Observable target selected by this runtime. For a client this may be remote even when
+    /// `backend` reports the server's local computation backend.
     pub execution_target: String,
     pub routing_policy: ExecutionPolicy,
     pub fallback: bool,
@@ -145,10 +159,41 @@ pub struct InferenceRequest {
     pub options: InferenceOptions,
 }
 
+impl InferenceRequest {
+    /// Creates a request with default local-only execution options.
+    pub fn new(model: impl Into<ModelReference>, input: impl Into<Input>) -> Self {
+        Self {
+            model: model.into(),
+            input: input.into(),
+            options: InferenceOptions::default(),
+        }
+    }
+
+    /// Replaces the request's execution options.
+    pub fn with_options(mut self, options: InferenceOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct InferenceResult {
     pub output: Output,
     pub metadata: ExecutionMetadata,
+}
+
+impl InferenceResult {
+    pub fn output(&self) -> &Output {
+        &self.output
+    }
+
+    pub fn metadata(&self) -> &ExecutionMetadata {
+        &self.metadata
+    }
+
+    pub fn into_output(self) -> Output {
+        self.output
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

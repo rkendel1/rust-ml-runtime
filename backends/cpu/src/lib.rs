@@ -34,7 +34,7 @@ fn validate_linear_model(model: &LinearModel) -> RuntimeResult<()> {
             .any(|row| row.len() != model.weights[0].len())
         || (!model.bias.is_empty() && model.bias.len() != model.weights.len())
     {
-        return Err(RuntimeError::InvalidInput {
+        return Err(RuntimeError::InvalidRequest {
             reason: "linear model weights and bias have incompatible shapes".to_owned(),
         });
     }
@@ -47,7 +47,7 @@ fn run_linear(
 ) -> RuntimeResult<ml_runtime_inference::Tensor> {
     let inputs = input.shape.last().copied().unwrap_or(0);
     if inputs != model.weights[0].len() || input.values.len() != inputs {
-        return Err(RuntimeError::InvalidInput {
+        return Err(RuntimeError::UnsupportedInput {
             reason: format!("expected a tensor with {} values", model.weights[0].len()),
         });
     }
@@ -92,22 +92,15 @@ impl Backend for CpuBackend {
             batching: true,
             max_batch_size: Some(16),
             supported_batch_shapes: Vec::new(),
-            supported_formats: vec![
-                ModelFormat::Onnx,
-                ModelFormat::CoreMl,
-                ModelFormat::Gguf,
-                ModelFormat::Safetensors,
-                ModelFormat::TensorRt,
-                ModelFormat::Unknown,
-            ],
+            supported_formats: vec![ModelFormat::Unknown],
             accelerators: Vec::new(),
             hardware: Some("cpu".to_owned()),
             notes: vec!["Portable CI backend for runtime validation".to_owned()],
         }
     }
 
-    fn supports(&self, _model: &ModelSpec) -> bool {
-        true
+    fn supports(&self, model: &ModelSpec) -> bool {
+        matches!(model.format, ModelFormat::Unknown)
     }
 
     async fn load(&self, model: &ModelSpec) -> RuntimeResult<ModelHandle> {
@@ -151,16 +144,14 @@ impl Backend for CpuBackend {
             return Err(RuntimeError::Cancelled);
         }
 
-        let loaded = model
-            .state::<CpuLoadedModel>()
-            .ok_or_else(|| RuntimeError::InvalidInput {
-                reason: "model handle does not belong to the CPU backend".to_owned(),
-            })?;
+        let loaded = model.state::<CpuLoadedModel>().ok_or_else(|| {
+            RuntimeError::execution("infer", "model handle does not belong to the CPU backend")
+        })?;
 
         let output = match (&loaded.linear, &request.input) {
             (Some(linear), Input::Tensor(tensor)) => Output::Tensor(run_linear(linear, tensor)?),
             (Some(_), _) => {
-                return Err(RuntimeError::InvalidInput {
+                return Err(RuntimeError::UnsupportedInput {
                     reason: "this model accepts tensor input".to_owned(),
                 })
             }
@@ -169,7 +160,7 @@ impl Backend for CpuBackend {
             (None, Input::Tensor(tensor)) => Output::Tensor(tensor.clone()),
             (None, Input::Binary(bytes)) => Output::Binary(bytes.clone()),
             (None, Input::Structured(value)) => Output::Structured(value.clone()),
-            (None, Input::Image(_) | Input::Audio(_)) => return Err(RuntimeError::InvalidInput {
+            (None, Input::Image(_) | Input::Audio(_)) => return Err(RuntimeError::UnsupportedInput {
                 reason:
                     "the CPU backend supports text, tokens, tensors, binary, and structured inputs"
                         .to_owned(),
@@ -201,11 +192,9 @@ impl Backend for CpuBackend {
             return Err(RuntimeError::Cancelled);
         }
 
-        let loaded = model
-            .state::<CpuLoadedModel>()
-            .ok_or_else(|| RuntimeError::InvalidInput {
-                reason: "model handle does not belong to the CPU backend".to_owned(),
-            })?;
+        let loaded = model.state::<CpuLoadedModel>().ok_or_else(|| {
+            RuntimeError::execution("infer", "model handle does not belong to the CPU backend")
+        })?;
 
         let chunks = match &request.input {
             Input::Text(text) => text

@@ -95,10 +95,14 @@ impl Provider for HttpProvider {
         let response =
             response.map_err(|error| RuntimeError::transport(self.name(), error.to_string()))?;
         let status = response.status();
-        let body: InferResponse = response
-            .json()
-            .await
-            .map_err(|error| RuntimeError::transport(self.name(), error.to_string()))?;
+        let body: InferResponse =
+            response
+                .json()
+                .await
+                .map_err(|error| RuntimeError::Protocol {
+                    operation: "decode inference response".to_owned(),
+                    reason: error.to_string(),
+                })?;
         if let Some(result) = body.result {
             return Ok(result);
         }
@@ -234,7 +238,7 @@ fn map_error(
         "model_not_found" => RuntimeError::ModelNotFound {
             model: error.message,
         },
-        "invalid_request" => RuntimeError::InvalidInput {
+        "invalid_request" => RuntimeError::InvalidRequest {
             reason: error.message,
         },
         "invalid_input" => RuntimeError::InvalidInput {
@@ -248,9 +252,25 @@ fn map_error(
             backend: "remote".to_owned(),
             reason: error.message,
         },
-        "model_unavailable" | "unsupported_model_format" => RuntimeError::CapabilityMismatch {
+        "model_unavailable" => RuntimeError::ModelUnavailable {
+            model: "remote model".to_owned(),
+            provider: "remote".to_owned(),
             reason: error.message,
         },
-        _ => RuntimeError::transport("remote", format!("HTTP {status}: {}", error.message)),
+        "model_integrity" => RuntimeError::ModelIntegrity {
+            model: "remote model".to_owned(),
+            reason: error.message,
+        },
+        "unsupported_model_format" => RuntimeError::CapabilityMismatch {
+            reason: error.message,
+        },
+        "protocol_error" => RuntimeError::Protocol {
+            operation: "remote inference".to_owned(),
+            reason: error.message,
+        },
+        _ => RuntimeError::Protocol {
+            operation: format!("remote inference (HTTP {status})"),
+            reason: error.message,
+        },
     }
 }

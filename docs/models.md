@@ -75,5 +75,11 @@ The CLI supports local package acquisition with:
 
 ```
 ml-runtime models install examples/models/linear --models models --json
-ml-runtime models verify linear@1 --models models
+ml-runtime models verify example-linear@1 --models models
 ```
+
+The real pretrained example is `examples/models/mnist-8`. Its manifest pins the
+MIT-licensed ONNX Model Zoo artifact at revision
+`a19f9a8c2333de1df9b03f10f5739f468b699a1a`, including its byte size and
+SHA-256. See the README's “Real model example” for its explicit preprocessing
+contract, local/remote commands, expected digit classification, and benchmark.

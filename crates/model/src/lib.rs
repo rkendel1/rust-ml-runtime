@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 pub type ModelMetadata = BTreeMap<String, String>;
 
+/// A validated, stable model name and version used by catalogs and installers.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ModelId {
     pub name: String,
@@ -82,6 +83,7 @@ pub enum ModelLocation {
     Memory,
 }
 
+/// An explicit backend-independent model definition and artifact location.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelSpec {
     pub id: String,
@@ -326,6 +328,7 @@ fn sha256(path: &Path) -> Result<String, CatalogError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// Catalog discovery information. A descriptor is metadata, not a loaded resource.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelDescriptor {
     pub id: ModelId,
@@ -528,6 +531,7 @@ impl ModelCatalog for FilesystemModelCatalog {
     }
 }
 
+/// A request-time model reference: either a catalog identity or an explicit specification.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ModelReference {
     Id { id: String, version: Option<String> },
@@ -540,6 +544,14 @@ impl ModelReference {
             id: id.into(),
             version,
         }
+    }
+
+    pub fn versioned(id: impl Into<String>, version: impl Into<String>) -> Self {
+        Self::id(id, Some(version.into()))
+    }
+
+    pub fn latest(id: impl Into<String>) -> Self {
+        Self::id(id, None)
     }
 }
 

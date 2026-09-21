@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use ml_runtime::Runtime;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
-use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
+use ml_runtime_inference::{ExecutionPolicy, InferenceChunk, InferenceRequest, InferenceResult};
 use ml_runtime_model::{FilesystemModelCatalog, ModelCatalog};
 use ml_runtime_protocol::{
     CapabilitiesResponse, ErrorEnvelope, HealthResponse, InferRequest, InferResponse, ModelInfo,
@@ -174,7 +174,7 @@ async fn capabilities(State(state): State<ServerState>) -> Json<CapabilitiesResp
 
 async fn infer_stream(
     State(state): State<ServerState>,
-    Json(payload): Json<InferRequest>,
+    Json(mut payload): Json<InferRequest>,
 ) -> Response {
     let valid_reference = matches!(
         &payload.request.model,
@@ -193,6 +193,7 @@ async fn infer_stream(
         )
             .into_response();
     }
+    normalize_client_policy(&mut payload.request);
     let stream = match state.runtime.infer_stream(payload.request).await {
         Ok(stream) => stream,
         Err(error) => {
@@ -222,7 +223,7 @@ async fn model_list(State(state): State<ServerState>) -> Json<Vec<ModelInfo>> {
 
 async fn infer(
     State(state): State<ServerState>,
-    Json(payload): Json<InferRequest>,
+    Json(mut payload): Json<InferRequest>,
 ) -> (StatusCode, Json<InferResponse>) {
     let valid_reference = match &payload.request.model {
         ml_runtime_model::ModelReference::Id { id, .. } => {
@@ -238,6 +239,7 @@ async fn infer(
         };
         return (StatusCode::BAD_REQUEST, Json(InferResponse::error(error)));
     }
+    normalize_client_policy(&mut payload.request);
     match state.runtime.infer(payload.request).await {
         Ok(result) => (StatusCode::OK, Json(InferResponse::success(result))),
         Err(error) => {
@@ -250,15 +252,30 @@ async fn infer(
     }
 }
 
+fn normalize_client_policy(request: &mut InferenceRequest) {
+    if request.options.require_remote
+        || matches!(request.options.execution, ExecutionPolicy::RemoteOnly)
+    {
+        request.options.require_remote = false;
+        request.options.execution = ExecutionPolicy::LocalOnly;
+    }
+}
+
 fn error_envelope(error: &RuntimeError) -> ErrorEnvelope {
     let (code, retryable) = match error {
+        RuntimeError::InvalidRequest { .. } => ("invalid_request", false),
         RuntimeError::ModelNotFound { .. } => ("model_not_found", false),
-        RuntimeError::InvalidInput { .. } => ("invalid_input", false),
+        RuntimeError::ModelUnavailable { .. } => ("model_unavailable", true),
+        RuntimeError::ModelIntegrity { .. } => ("model_integrity", false),
+        RuntimeError::InvalidInput { .. } | RuntimeError::UnsupportedInput { .. } => {
+            ("invalid_input", false)
+        }
         RuntimeError::Timeout { .. } => ("timeout", true),
         RuntimeError::Cancelled => ("request_cancelled", false),
         RuntimeError::BackendUnavailable { .. } => ("backend_unavailable", true),
         RuntimeError::UnsupportedModel { .. } => ("unsupported_model_format", false),
         RuntimeError::ProviderUnavailable { .. } => ("model_unavailable", true),
+        RuntimeError::Protocol { .. } => ("protocol_error", false),
         _ => ("inference_failed", false),
     };
     ErrorEnvelope {
@@ -271,8 +288,11 @@ fn error_envelope(error: &RuntimeError) -> ErrorEnvelope {
 fn status_for(code: &str) -> StatusCode {
     match code {
         "model_not_found" => StatusCode::NOT_FOUND,
-        "invalid_input" => StatusCode::BAD_REQUEST,
+        "invalid_request" | "invalid_input" => StatusCode::BAD_REQUEST,
+        "model_integrity" => StatusCode::UNPROCESSABLE_ENTITY,
+        "model_unavailable" | "backend_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         "timeout" => StatusCode::GATEWAY_TIMEOUT,
+        "protocol_error" => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

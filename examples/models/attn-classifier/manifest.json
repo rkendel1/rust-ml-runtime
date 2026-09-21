@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "attn-classifier",
+  "model_version": "1",
+  "format": "Unknown",
+  "artifact": {
+    "path": "artifacts/model.json",
+    "size_bytes": 214,
+    "sha256": "cfb120d632aed07cc14a394590784fdaacf79ec2cf73cf09d8270a6ee43a56e2"
+  },
+  "inputs": [
+    {
+      "name": "content_features",
+      "data_type": "float32",
+      "shape": [5]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "category_scores",
+      "data_type": "float32",
+      "shape": [5]
+    }
+  ],
+  "metadata": {
+    "description": "Deterministic Attn application-boundary classification fixture",
+    "license": "MIT",
+    "categories": "idea,task,question,reference,noise",
+    "task": "content-classification"
+  }
+}

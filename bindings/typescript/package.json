@@ -4,5 +4,8 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts"
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
 }

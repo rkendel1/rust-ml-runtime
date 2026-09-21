@@ -34,7 +34,7 @@ Start a local server and invoke it with the generic CLI:
 
 ```text
 ml-runtime serve --bind 127.0.0.1:8080 --models examples/models
-ml-runtime run --endpoint http://127.0.0.1:8080 --model example-linear@1 --tensor 2,4
+ml-runtime run example-linear@1 --endpoint http://127.0.0.1:8080 --execution prefer-local --tensor 2,4
 ```
 
 The versioned wire contract is defined in `crates/protocol` under `/v1`.

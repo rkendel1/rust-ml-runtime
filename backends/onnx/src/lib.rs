@@ -24,7 +24,7 @@ impl OnnxBackend {
 
     fn load_session(model: &ModelSpec) -> RuntimeResult<Session> {
         let ModelLocation::Path(path) = &model.location else {
-            return Err(RuntimeError::InvalidInput {
+            return Err(RuntimeError::InvalidRequest {
                 reason: "ONNX models require a filesystem artifact".to_owned(),
             });
         };
@@ -86,19 +86,16 @@ impl Backend for OnnxBackend {
         {
             return Err(RuntimeError::Cancelled);
         }
-        let loaded =
-            model
-                .state::<OnnxLoadedModel>()
-                .ok_or_else(|| RuntimeError::InvalidInput {
-                    reason: "model handle does not belong to the ONNX backend".to_owned(),
-                })?;
+        let loaded = model.state::<OnnxLoadedModel>().ok_or_else(|| {
+            RuntimeError::execution("infer", "model handle does not belong to the ONNX backend")
+        })?;
         let Input::Tensor(input) = &request.input else {
-            return Err(RuntimeError::InvalidInput {
+            return Err(RuntimeError::UnsupportedInput {
                 reason: "ONNX backend currently accepts tensor input".to_owned(),
             });
         };
         if input.shape.iter().product::<usize>() != input.values.len() {
-            return Err(RuntimeError::InvalidInput {
+            return Err(RuntimeError::UnsupportedInput {
                 reason: "tensor shape does not match tensor values".to_owned(),
             });
         }

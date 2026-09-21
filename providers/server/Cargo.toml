@@ -19,3 +19,6 @@ tokio-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+ml-runtime-http-provider = { path = "../http" }

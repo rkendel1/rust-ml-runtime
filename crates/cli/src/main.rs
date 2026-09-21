@@ -64,12 +64,7 @@ enum Commands {
         json: bool,
     },
     Run(RunArgs),
-    Bench {
-        #[arg(long, default_value_t = 5)]
-        iterations: usize,
-        #[arg(long)]
-        json: bool,
-    },
+    Bench(BenchArgs),
     Serve(ServeArgs),
 }
 
@@ -120,6 +115,8 @@ struct RunArgs {
     stream: bool,
     #[arg(long)]
     verbose: bool,
+    #[arg(long, default_value = "examples/models")]
+    models: String,
 }
 
 #[derive(Args)]
@@ -128,6 +125,23 @@ struct ServeArgs {
     bind: String,
     #[arg(long, default_value = "examples/models")]
     models: String,
+}
+
+#[derive(Args)]
+struct BenchArgs {
+    model: Option<String>,
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+    #[arg(long, value_delimiter = ',')]
+    tensor: Option<Vec<f32>>,
+    #[arg(long, value_delimiter = ',')]
+    shape: Option<Vec<usize>>,
+    #[arg(long)]
+    backend: Option<String>,
+    #[arg(long, default_value = "examples/models")]
+    models: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
@@ -397,14 +411,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .resolve(&ModelReference::id(package.manifest.id, Some(version)))
                     .await?
             } else {
-                catalog
-                    .resolve(&ModelReference::id(
-                        model.clone(),
-                        model
-                            .split_once('@')
-                            .and_then(|(_, version)| Some(version.to_owned())),
-                    ))
-                    .await?
+                let (id, version) = model
+                    .split_once('@')
+                    .map_or((model.as_str(), None), |(id, version)| {
+                        (id, Some(version.to_owned()))
+                    });
+                catalog.resolve(&ModelReference::id(id, version)).await?
             };
             let package = ModelPackage::open(&descriptor.package_path)
                 .map_err(|error| format!("open model package: {error}"))?;
@@ -430,7 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Run(args) => {
-            let runtime = build_runtime(
+            let mut runtime = build_runtime(
                 args.backend.clone(),
                 args.provider.clone(),
                 args.allow_remote_fallback,
@@ -445,21 +457,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_or((args.model.as_str(), None), |(id, version)| {
                         (id, Some(version.to_owned()))
                     });
-                {
-                    let mut spec = ModelSpec::new(id, ModelFormat::Unknown, ModelLocation::Memory);
-                    spec.version = version;
-                    spec
-                }
+                ModelReference::id(id, version)
             } else if std::path::Path::new(&args.model).is_dir() {
-                ModelPackage::open(&args.model)
-                    .map_err(|error| format!("open model package: {error}"))?
-                    .spec()
-            } else {
-                ModelSpec::new(
-                    args.model.clone(),
-                    ModelFormat::Unknown,
-                    ModelLocation::Memory,
+                ModelReference::Spec(
+                    ModelPackage::open(&args.model)
+                        .map_err(|error| format!("open model package: {error}"))?
+                        .spec(),
                 )
+            } else {
+                runtime.set_catalog(FilesystemModelCatalog::new(&args.models));
+                let (id, version) = args
+                    .model
+                    .split_once('@')
+                    .map_or((args.model.as_str(), None), |(id, version)| {
+                        (id, Some(version.to_owned()))
+                    });
+                ModelReference::id(id, version)
             };
             let input = match args.tensor {
                 Some(values) => Input::Tensor(ml_runtime::ml_runtime_inference::Tensor {
@@ -469,11 +482,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => Input::Text(args.input),
             };
             let request = InferenceRequest {
-                model: if remote {
-                    ModelReference::id(model.id, model.version)
-                } else {
-                    ModelReference::Spec(model)
-                },
+                model,
                 input,
                 options: InferenceOptions {
                     require_remote: args.require_remote,
@@ -537,42 +546,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Bench { iterations, json } => {
-            let runtime = build_runtime(None, None, false, false, None);
-            let model = ModelSpec::new(
-                "benchmark-model",
-                ModelFormat::Unknown,
-                ModelLocation::Memory,
-            );
-            let load_start = std::time::Instant::now();
-            runtime.load(model.clone()).await?;
-            let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
-            let start = std::time::Instant::now();
-            for _ in 0..iterations.max(1) {
-                runtime
-                    .infer(InferenceRequest {
-                        model: model.clone().into(),
-                        input: Input::Text("benchmark input".to_owned()),
-                        options: InferenceOptions::default(),
-                    })
-                    .await?;
+        Commands::Bench(args) => {
+            let mut runtime = build_runtime(args.backend.clone(), None, false, false, None);
+            let (model, input) = if let Some(model) = args.model.as_deref() {
+                let values = args
+                    .tensor
+                    .clone()
+                    .ok_or("benchmarking a catalog model requires --tensor")?;
+                let shape = args.shape.clone().unwrap_or_else(|| vec![values.len()]);
+                let (id, version) = model
+                    .split_once('@')
+                    .map_or((model, None), |(id, version)| {
+                        (id, Some(version.to_owned()))
+                    });
+                runtime.set_catalog(FilesystemModelCatalog::new(&args.models));
+                (
+                    ModelReference::id(id, version),
+                    Input::Tensor(ml_runtime::ml_runtime_inference::Tensor { shape, values }),
+                )
+            } else {
+                (
+                    ModelSpec::new(
+                        "benchmark-model",
+                        ModelFormat::Unknown,
+                        ModelLocation::Memory,
+                    )
+                    .into(),
+                    Input::Text("benchmark input".to_owned()),
+                )
+            };
+            let request = InferenceRequest {
+                model,
+                input,
+                options: InferenceOptions::default(),
+            };
+            let iterations = args.iterations.max(1);
+            let first_start = std::time::Instant::now();
+            let first = runtime.infer(request.clone()).await?;
+            let first_latency_ms = first_start.elapsed().as_secs_f64() * 1000.0;
+            let steady_start = std::time::Instant::now();
+            for _ in 1..iterations {
+                runtime.infer(request.clone()).await?;
             }
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let steady_elapsed_ms = steady_start.elapsed().as_secs_f64() * 1000.0;
+            let total_ms = first_latency_ms + steady_elapsed_ms;
             let output = json!({
-                "iterations": iterations.max(1),
-                "model_load_ms": load_ms,
-                "total_inference_ms": elapsed_ms,
-                "average_inference_ms": elapsed_ms / iterations.max(1) as f64,
+                "model": first.metadata.model,
+                "version": first.metadata.model_version,
+                "provider": first.metadata.provider,
+                "backend": first.metadata.backend,
+                "execution_target": first.metadata.execution_target,
+                "iterations": iterations,
+                "model_load_ms": first.metadata.model_load_ms,
+                "first_inference_ms": first_latency_ms,
+                "total_inference_ms": total_ms,
+                "average_inference_ms": total_ms / iterations as f64,
+                "throughput_requests_per_second": iterations as f64 * 1000.0 / total_ms,
                 "metrics": runtime.metrics(),
             });
-            if json {
+            if args.json {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                println!("iterations={}", iterations.max(1));
-                println!("model_load_ms={load_ms:.3}");
                 println!(
-                    "average_inference_ms={:.3}",
-                    elapsed_ms / iterations.max(1) as f64
+                    "model={}@{}",
+                    first.metadata.model,
+                    first
+                        .metadata
+                        .model_version
+                        .as_deref()
+                        .unwrap_or("unversioned")
+                );
+                println!(
+                    "provider={} backend={} target={}",
+                    first.metadata.provider,
+                    first.metadata.backend,
+                    first.metadata.execution_target
+                );
+                println!("iterations={iterations}");
+                println!("first_inference_ms={first_latency_ms:.3}");
+                println!("average_inference_ms={:.3}", total_ms / iterations as f64);
+                println!(
+                    "throughput_requests_per_second={:.3}",
+                    iterations as f64 * 1000.0 / total_ms
                 );
             }
         }

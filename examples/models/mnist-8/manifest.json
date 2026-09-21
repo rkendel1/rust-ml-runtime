@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "mnist-8",
+  "model_version": "8",
+  "format": "onnx",
+  "artifact": {
+    "path": "artifacts/model.onnx",
+    "size_bytes": 26454,
+    "sha256": "2f06e72de813a8635c9bc0397ac447a601bdbfa7df4bebc278723b958831c9bf"
+  },
+  "inputs": [
+    {
+      "name": "Input3",
+      "data_type": "float32",
+      "shape": [1, 1, 28, 28]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Plus214_Output_0",
+      "data_type": "float32",
+      "shape": [1, 10]
+    }
+  ],
+  "metadata": {
+    "description": "Pretrained CNN for MNIST handwritten digit classification",
+    "license": "MIT",
+    "opset": "8",
+    "preprocessing": "28x28 grayscale; black background; white foreground; float32 pixels scaled to [0,1]",
+    "source": "https://huggingface.co/onnxmodelzoo/mnist-8",
+    "source_revision": "a19f9a8c2333de1df9b03f10f5739f468b699a1a",
+    "task": "handwritten-digit-classification"
+  }
+}

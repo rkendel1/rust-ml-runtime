@@ -1,14 +1,11 @@
 use futures_util::StreamExt;
 use ml_runtime_backend::{Backend, BackendCapability};
-use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
-use ml_runtime_inference::{
-    ExecutionMetadata, ExecutionPolicy, InferenceChunk, InferenceOptions, InferenceRequest,
-    InferenceResult, InferenceStreamEvent, Input, Output,
-};
-use ml_runtime_model::{
-    CatalogError, ModelCatalog, ModelDescriptor, ModelFormat, ModelHandle, ModelLocation,
-    ModelReference, ModelSpec,
-};
+use ml_runtime_common::BoxStream;
+use ml_runtime_cpu_backend::CpuBackend;
+use ml_runtime_http_provider::HttpProvider;
+use ml_runtime_inference::InferenceChunk;
+use ml_runtime_model::{CatalogError, ModelCatalog, ModelHandle};
+use ml_runtime_onnx_backend::OnnxBackend;
 use ml_runtime_provider::{Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,12 +25,22 @@ use tokio_stream::wrappers::ReceiverStream;
 
 pub use ml_runtime_backend;
 pub use ml_runtime_common;
+pub use ml_runtime_common::{CancellationToken, RuntimeError, RuntimeResult};
 pub use ml_runtime_inference;
+pub use ml_runtime_inference::{
+    ExecutionMetadata, ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceResult,
+    InferenceStreamEvent, Input, Output, Tensor,
+};
 pub use ml_runtime_model;
+pub use ml_runtime_model::{
+    FilesystemModelCatalog, ModelDescriptor, ModelFormat, ModelId, ModelLocation, ModelReference,
+    ModelSpec,
+};
 pub use ml_runtime_provider;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Bounded asynchronous stream of normalized runtime-owned inference events.
 pub type InferenceStream = BoxStream<RuntimeResult<InferenceStreamEvent>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -338,6 +345,7 @@ struct LoadedModel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Opaque runtime-owned reference to a loaded model resource.
 pub struct RuntimeModelHandle {
     model_id: String,
     version: Option<String>,
@@ -390,6 +398,7 @@ impl Hash for ModelCacheKey {
     }
 }
 
+/// Explicit construction and extension surface for an application-owned [`Runtime`].
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
@@ -399,12 +408,19 @@ pub struct RuntimeBuilder {
 
 impl Default for RuntimeBuilder {
     fn default() -> Self {
-        Self {
+        let mut builder = Self {
             config: RuntimeConfig::default(),
             backends: BTreeMap::new(),
             providers: BTreeMap::new(),
             catalog: None,
-        }
+        };
+        builder
+            .backends
+            .insert("cpu".to_owned(), Arc::new(CpuBackend));
+        builder
+            .backends
+            .insert("onnx".to_owned(), Arc::new(OnnxBackend));
+        builder
     }
 }
 
@@ -416,6 +432,14 @@ impl RuntimeBuilder {
 
     pub fn provider(mut self, name: impl Into<String>) -> Self {
         self.config.selected_provider = Some(name.into());
+        self
+    }
+
+    /// Configures the built-in HTTP provider as the selected remote target.
+    pub fn remote(mut self, endpoint: impl Into<String>) -> Self {
+        let provider = HttpProvider::new(endpoint);
+        self.providers
+            .insert(provider.name().to_owned(), Arc::new(provider));
         self
     }
 
@@ -474,6 +498,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an experimental/custom backend extension by its declared name.
     pub fn register_backend<B>(mut self, backend: B) -> Self
     where
         B: Backend + 'static,
@@ -488,6 +513,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an experimental/custom provider extension by its declared name.
     pub fn register_provider<P>(mut self, provider: P) -> Self
     where
         P: Provider + 'static,
@@ -523,6 +549,11 @@ impl RuntimeBuilder {
     }
 }
 
+/// Coordinates catalog resolution, routing, model lifecycle, and inference.
+///
+/// A runtime is explicit application state; it does not create global state or
+/// background services. Use [`Runtime::builder`] to obtain built-in CPU and
+/// ONNX execution.
 pub struct Runtime {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
@@ -707,6 +738,8 @@ impl Runtime {
         })
     }
 
+    /// Explicitly loads a model for repeated execution with [`Self::infer_loaded`].
+    /// Normal one-off requests should use [`Self::infer`], which loads lazily.
     pub async fn load(&self, model: ModelSpec) -> RuntimeResult<RuntimeModelHandle> {
         if self
             .config
@@ -817,11 +850,13 @@ impl Runtime {
         }
     }
 
+    /// Resolves, loads, routes, and executes one request.
     pub async fn infer(&self, request: InferenceRequest) -> RuntimeResult<InferenceResult> {
         self.infer_with_cancellation(request, CancellationToken::new())
             .await
     }
 
+    /// Executes against a previously loaded handle without exposing cache internals.
     pub async fn infer_loaded(
         &self,
         model: &RuntimeModelHandle,
@@ -851,9 +886,13 @@ impl Runtime {
         .await
     }
 
+    /// Executes requests in stable input order.
+    ///
+    /// The call fails as a whole on a request error. Backends without native
+    /// batching are invoked individually behind the same API.
     pub async fn infer_batch(
         &self,
-        requests: Vec<InferenceRequest>,
+        mut requests: Vec<InferenceRequest>,
     ) -> RuntimeResult<Vec<InferenceResult>> {
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -870,6 +909,9 @@ impl Runtime {
         }
         for request in &requests {
             self.validate_request(request)?;
+        }
+        for request in &mut requests {
+            self.resolve_catalog_reference_for_local(request).await?;
         }
         let selection = self.select_for_request(&requests[0])?;
         let same_model = requests
@@ -954,6 +996,8 @@ impl Runtime {
         Ok(results)
     }
 
+    /// Executes one request while propagating cancellation through scheduling,
+    /// provider transport, and backend execution.
     pub async fn infer_with_cancellation(
         &self,
         request: InferenceRequest,
@@ -1027,23 +1071,8 @@ impl Runtime {
             _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
         };
 
-        let local_resolution = request.options.require_local
-            || (!request.options.require_remote
-                && matches!(
-                    request.options.execution,
-                    ExecutionPolicy::LocalOnly
-                        | ExecutionPolicy::PreferLocal
-                        | ExecutionPolicy::LocalThenRemote
-                ));
-        if local_resolution && !self.is_loaded(&request.model) {
-            if let (Some(catalog), ModelReference::Id { .. }) = (&self.catalog, &request.model) {
-                let descriptor = catalog
-                    .resolve(&request.model)
-                    .await
-                    .map_err(catalog_error)?;
-                request.model = ModelReference::Spec(descriptor.spec());
-            }
-        }
+        self.resolve_catalog_reference_for_local(&mut request)
+            .await?;
 
         let mut selection = self.select_for_request(&request)?;
         let timeout_ms = request.options.timeout_ms.or(self.config.timeout_ms);
@@ -1276,14 +1305,16 @@ impl Runtime {
         Ok(result)
     }
 
+    /// Starts normalized `Started` → `Output*` → `Completed` streaming.
     pub async fn infer_stream(&self, request: InferenceRequest) -> RuntimeResult<InferenceStream> {
         self.infer_stream_with_cancellation(request, CancellationToken::new())
             .await
     }
 
+    /// Starts a bounded stream with caller-controlled cancellation.
     pub async fn infer_stream_with_cancellation(
         &self,
-        request: InferenceRequest,
+        mut request: InferenceRequest,
         cancellation: CancellationToken,
     ) -> RuntimeResult<InferenceStream> {
         self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -1296,6 +1327,8 @@ impl Runtime {
                 reason: "infer_stream requires InferenceOptions::stream to be true".to_owned(),
             });
         }
+        self.resolve_catalog_reference_for_local(&mut request)
+            .await?;
         let selection = self.select_for_request(&request)?;
         let buffer = self.config.max_stream_buffer;
         if buffer == 0 {
@@ -1384,7 +1417,7 @@ impl Runtime {
 
     fn validate_request(&self, request: &InferenceRequest) -> RuntimeResult<()> {
         if request.options.require_local && request.options.require_remote {
-            return Err(RuntimeError::CapabilityMismatch {
+            return Err(RuntimeError::InvalidRequest {
                 reason: "request cannot require both local and remote execution".to_owned(),
             });
         }
@@ -1397,6 +1430,34 @@ impl Runtime {
                 return Err(RuntimeError::ResourceLimit {
                     reason: format!("batch size {batch_size} exceeds configured limit {limit}"),
                 });
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_catalog_reference_for_local(
+        &self,
+        request: &mut InferenceRequest,
+    ) -> RuntimeResult<()> {
+        let local_resolution = request.options.require_local
+            || (!request.options.require_remote
+                && matches!(
+                    request.options.execution,
+                    ExecutionPolicy::LocalOnly
+                        | ExecutionPolicy::PreferLocal
+                        | ExecutionPolicy::LocalThenRemote
+                ));
+        if local_resolution && !self.is_loaded(&request.model) {
+            if let (Some(catalog), ModelReference::Id { .. }) = (&self.catalog, &request.model) {
+                let descriptor = catalog
+                    .resolve(&request.model)
+                    .await
+                    .map_err(catalog_error)?;
+                catalog
+                    .validate(&descriptor.id)
+                    .await
+                    .map_err(catalog_error)?;
+                request.model = ModelReference::Spec(descriptor.spec());
             }
         }
         Ok(())
@@ -1599,11 +1660,13 @@ impl Runtime {
             && matches!(
                 error,
                 RuntimeError::ProviderUnavailable { .. }
+                    | RuntimeError::ModelUnavailable { .. }
                     | RuntimeError::BackendUnavailable { .. }
                     | RuntimeError::ModelNotFound { .. }
                     | RuntimeError::CapabilityMismatch { .. }
                     | RuntimeError::Timeout { .. }
                     | RuntimeError::Transport { .. }
+                    | RuntimeError::Protocol { .. }
             )
     }
 
@@ -1709,9 +1772,12 @@ fn model_details(reference: &ModelReference) -> (String, Option<String>) {
 fn catalog_error(error: CatalogError) -> RuntimeError {
     match error {
         CatalogError::ModelNotFound(model) => RuntimeError::ModelNotFound { model },
-        CatalogError::InvalidIdentity(model) => RuntimeError::InvalidInput {
+        CatalogError::InvalidIdentity(model) => RuntimeError::InvalidRequest {
             reason: format!("invalid model identity: {model}"),
         },
+        CatalogError::ArtifactIntegrity { model, reason } => {
+            RuntimeError::ModelIntegrity { model, reason }
+        }
         other => RuntimeError::Execution {
             operation: "catalog".to_owned(),
             reason: other.to_string(),
@@ -1869,12 +1935,72 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures_util::StreamExt;
+    use ml_runtime_backend::BackendCapabilities;
     use ml_runtime_common::BoxStream;
     use ml_runtime_cpu_backend::CpuBackend;
     use ml_runtime_inference::InferenceOptions;
     use ml_runtime_provider::{Provider, ProviderCapabilities};
     use serde_json::json;
     use tokio_stream::iter;
+
+    #[derive(Clone)]
+    struct BlockingBackend {
+        started: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl Backend for BlockingBackend {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                available: true,
+                local: true,
+                streaming: true,
+                cancellation: true,
+                supported_formats: vec![ModelFormat::Unknown],
+                ..BackendCapabilities::default()
+            }
+        }
+
+        fn supports(&self, model: &ModelSpec) -> bool {
+            model.format == ModelFormat::Unknown
+        }
+
+        async fn load(&self, model: &ModelSpec) -> RuntimeResult<ModelHandle> {
+            Ok(ModelHandle::new(
+                model.id.clone(),
+                self.name(),
+                model.format.clone(),
+                Arc::new(()),
+            ))
+        }
+
+        async fn infer(
+            &self,
+            _model: &ModelHandle,
+            _request: &InferenceRequest,
+            cancellation: Option<CancellationToken>,
+        ) -> RuntimeResult<InferenceResult> {
+            self.started.add_permits(1);
+            cancellation
+                .expect("runtime supplies cancellation")
+                .cancelled()
+                .await;
+            Err(RuntimeError::Cancelled)
+        }
+
+        async fn infer_stream(
+            &self,
+            _model: &ModelHandle,
+            _request: &InferenceRequest,
+            _cancellation: Option<CancellationToken>,
+        ) -> RuntimeResult<BoxStream<RuntimeResult<InferenceChunk>>> {
+            Ok(Box::pin(futures_util::stream::pending()))
+        }
+    }
 
     #[test]
     fn runtime_version_is_workspace_version() {
@@ -1909,6 +2035,13 @@ mod tests {
             request: InferenceRequest,
             cancellation: Option<CancellationToken>,
         ) -> RuntimeResult<InferenceResult> {
+            if model_id(&request.model) == "blocking-remote" {
+                cancellation
+                    .expect("runtime supplies cancellation")
+                    .cancelled()
+                    .await;
+                return Err(RuntimeError::Cancelled);
+            }
             if cancellation
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
@@ -2097,6 +2230,122 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, RuntimeError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn cancels_active_and_queued_inference() {
+        let started = Arc::new(Semaphore::new(0));
+        let runtime = Arc::new(
+            Runtime::builder()
+                .register_backend(BlockingBackend {
+                    started: Arc::clone(&started),
+                })
+                .backend("blocking")
+                .concurrency(1)
+                .build(),
+        );
+        let make_request = || {
+            InferenceRequest::new(
+                ModelSpec::new("blocking", ModelFormat::Unknown, ModelLocation::Memory),
+                "input",
+            )
+        };
+
+        let active_token = CancellationToken::new();
+        let active = {
+            let runtime = Arc::clone(&runtime);
+            let token = active_token.clone();
+            tokio::spawn(
+                async move { runtime.infer_with_cancellation(make_request(), token).await },
+            )
+        };
+        let permit = started.acquire().await.unwrap();
+        permit.forget();
+
+        let queued_token = CancellationToken::new();
+        let queued = {
+            let runtime = Arc::clone(&runtime);
+            let token = queued_token.clone();
+            tokio::spawn(
+                async move { runtime.infer_with_cancellation(make_request(), token).await },
+            )
+        };
+        tokio::task::yield_now().await;
+        queued_token.cancel();
+        assert!(matches!(
+            queued.await.unwrap(),
+            Err(RuntimeError::Cancelled)
+        ));
+
+        active_token.cancel();
+        assert!(matches!(
+            active.await.unwrap(),
+            Err(RuntimeError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancels_an_active_stream() {
+        let runtime = Runtime::builder()
+            .register_backend(BlockingBackend {
+                started: Arc::new(Semaphore::new(0)),
+            })
+            .backend("blocking")
+            .build();
+        let token = CancellationToken::new();
+        let mut stream = runtime
+            .infer_stream_with_cancellation(
+                InferenceRequest::new(
+                    ModelSpec::new("blocking", ModelFormat::Unknown, ModelLocation::Memory),
+                    "input",
+                )
+                .with_options(InferenceOptions {
+                    stream: true,
+                    ..InferenceOptions::default()
+                }),
+                token.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            InferenceStreamEvent::Started(_)
+        ));
+        token.cancel();
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(RuntimeError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn propagates_remote_cancellation() {
+        let runtime = Arc::new(
+            Runtime::builder()
+                .register_provider(MockRemoteProvider)
+                .provider("mock-remote")
+                .build(),
+        );
+        let token = CancellationToken::new();
+        let task = {
+            let runtime = Arc::clone(&runtime);
+            let token = token.clone();
+            tokio::spawn(async move {
+                runtime
+                    .infer_with_cancellation(
+                        InferenceRequest::new(ModelReference::latest("blocking-remote"), "input")
+                            .with_options(InferenceOptions {
+                                execution: ExecutionPolicy::RemoteOnly,
+                                ..InferenceOptions::default()
+                            }),
+                        token,
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        token.cancel();
+        assert!(matches!(task.await.unwrap(), Err(RuntimeError::Cancelled)));
     }
 
     #[tokio::test]
