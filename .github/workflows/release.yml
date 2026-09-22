@@ -41,7 +41,7 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, platform: linux-x86_64, npm_platform: linux-x64-gnu }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, platform: linux-aarch64, npm_platform: linux-arm64-gnu }
-          - { target: x86_64-apple-darwin, runner: macos-13, platform: macos-x86_64, npm_platform: darwin-x64 }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, platform: macos-x86_64, npm_platform: darwin-x64 }
           - { target: aarch64-apple-darwin, runner: macos-14, platform: macos-aarch64, npm_platform: darwin-arm64 }
           - { target: x86_64-pc-windows-msvc, runner: windows-latest, platform: windows-x86_64, npm_platform: win32-x64-msvc }
     steps:
