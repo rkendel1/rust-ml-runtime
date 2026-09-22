@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    fs,
+    path::Path,
     path::PathBuf,
     process::Stdio,
     sync::Arc,
@@ -31,6 +33,143 @@ pub struct Capability {
     pub local: bool,
     pub remote: bool,
     pub resource_requirements: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityPackageManifest {
+    pub package: PackageManifest,
+    pub provider: ProviderManifest,
+    pub capabilities: Vec<PackageCapability>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageManifest {
+    pub id: String,
+    pub version: String,
+    pub runtime: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderManifest {
+    pub id: String,
+    pub version: String,
+    #[serde(default)]
+    pub execution_targets: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub configuration: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageCapability {
+    pub id: String,
+    pub version: String,
+    #[serde(default)]
+    pub execution_targets: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub configuration: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+impl CapabilityPackageManifest {
+    pub fn validate(&self) -> RuntimeResult<()> {
+        if self.package.id.trim().is_empty()
+            || self.package.version.trim().is_empty()
+            || self.package.runtime.trim().is_empty()
+            || self.provider.id.trim().is_empty()
+            || self.provider.version.trim().is_empty()
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "package and provider identity, version, and runtime are required"
+                    .to_owned(),
+            });
+        }
+        if self.capabilities.is_empty()
+            || self.capabilities.iter().any(|capability| {
+                capability.id.trim().is_empty() || capability.version.trim().is_empty()
+            })
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "at least one capability with an id and version is required".to_owned(),
+            });
+        }
+        if !runtime_requirement_satisfied(&self.package.runtime, crate::VERSION) {
+            return Err(RuntimeError::InvalidRequest {
+                reason: format!(
+                    "provider requires runtime {}, current runtime is {}",
+                    self.package.runtime,
+                    crate::VERSION
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> RuntimeResult<Self> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path).map_err(|error| RuntimeError::Execution {
+            operation: "read provider manifest".to_owned(),
+            reason: error.to_string(),
+        })?;
+        let manifest = toml::from_str(&contents).map_err(|error| RuntimeError::InvalidRequest {
+            reason: format!("invalid provider manifest {}: {error}", path.display()),
+        })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn runtime_requirement_satisfied(requirement: &str, current: &str) -> bool {
+        let Some(required) = requirement.strip_prefix(">=") else {
+            return requirement == current || requirement == "*" || requirement.is_empty();
+        };
+        version_key(current) >= version_key(required)
+    }
+
+    fn version_key(version: &str) -> (u64, u64, u64) {
+        let mut parts = version
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0));
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalProviderPackage {
+    pub path: PathBuf,
+    pub manifest: CapabilityPackageManifest,
+    pub binary: Option<PathBuf>,
+}
+
+impl LocalProviderPackage {
+    pub fn load(path: impl Into<PathBuf>) -> RuntimeResult<Self> {
+        let path = path.into();
+        let manifest = CapabilityPackageManifest::from_path(path.join("manifest.toml"))?;
+        let binary = ["provider", "provider.so", "provider.dylib", "provider.dll"]
+            .iter()
+            .map(|name| path.join(name))
+            .find(|candidate| candidate.is_file());
+        Ok(Self {
+            path,
+            manifest,
+            binary,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,7 +229,21 @@ pub trait CapabilityProvider: Send + Sync {
     fn version(&self) -> &str;
     fn capabilities(&self) -> Vec<Capability>;
     fn availability(&self) -> CapabilityAvailability;
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: self.id().to_owned(),
+            version: self.version().to_owned(),
+            package: None,
+        }
+    }
     async fn execute(&self, request: ExecutionRequest) -> RuntimeResult<ExecutionResult>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderDescriptor {
+    pub id: String,
+    pub version: String,
+    pub package: Option<String>,
 }
 
 pub struct BuiltinCapabilityProvider;
@@ -118,6 +271,101 @@ impl CapabilityProvider for BuiltinCapabilityProvider {
 
     async fn execute(&self, request: ExecutionRequest) -> RuntimeResult<ExecutionResult> {
         execute(request, None).await
+    }
+}
+
+pub struct ManifestCapabilityProvider {
+    package: LocalProviderPackage,
+    capabilities: Vec<Capability>,
+}
+
+impl ManifestCapabilityProvider {
+    pub fn new(package: LocalProviderPackage) -> Self {
+        let manifest = &package.manifest;
+        let capabilities = manifest
+            .capabilities
+            .iter()
+            .map(|capability| Capability {
+                id: capability.id.clone(),
+                version: capability.version.clone(),
+                category: capability
+                    .id
+                    .split('.')
+                    .next()
+                    .unwrap_or("runtime")
+                    .to_owned(),
+                description: format!("Provided by {}", manifest.provider.id),
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                requirements: capability.configuration.clone(),
+                execution_targets: if capability.execution_targets.is_empty() {
+                    manifest.provider.execution_targets.clone()
+                } else {
+                    capability.execution_targets.clone()
+                },
+                availability: true,
+                platform: capability
+                    .platforms
+                    .first()
+                    .or_else(|| manifest.provider.platforms.first())
+                    .cloned()
+                    .unwrap_or_else(|| "any".to_owned()),
+                backend: capability
+                    .backends
+                    .first()
+                    .or_else(|| manifest.provider.backends.first())
+                    .cloned()
+                    .unwrap_or_else(|| "external".to_owned()),
+                local: true,
+                remote: false,
+                resource_requirements: capability.dependencies.clone(),
+            })
+            .collect();
+        Self {
+            package,
+            capabilities,
+        }
+    }
+
+    pub fn package(&self) -> &LocalProviderPackage {
+        &self.package
+    }
+}
+
+#[async_trait]
+impl CapabilityProvider for ManifestCapabilityProvider {
+    fn id(&self) -> &str {
+        &self.package.manifest.provider.id
+    }
+
+    fn version(&self) -> &str {
+        &self.package.manifest.provider.version
+    }
+
+    fn capabilities(&self) -> Vec<Capability> {
+        self.capabilities.clone()
+    }
+
+    fn availability(&self) -> CapabilityAvailability {
+        CapabilityAvailability {
+            state: AvailabilityState::Registered,
+            reason: "manifest validated; provider execution is explicit".to_owned(),
+        }
+    }
+
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: self.id().to_owned(),
+            version: self.version().to_owned(),
+            package: Some(self.package.path.display().to_string()),
+        }
+    }
+
+    async fn execute(&self, _request: ExecutionRequest) -> RuntimeResult<ExecutionResult> {
+        Err(RuntimeError::ProviderUnavailable {
+            provider: self.id().to_owned(),
+            reason: ": provider binary loading is not enabled by manifest discovery".to_owned(),
+        })
     }
 }
 
@@ -159,6 +407,44 @@ impl CapabilityRegistry {
 
     pub fn providers(&self) -> Vec<Arc<dyn CapabilityProvider>> {
         self.providers.values().cloned().collect()
+    }
+
+    pub fn discover_local_packages(
+        root: impl AsRef<Path>,
+    ) -> RuntimeResult<Vec<LocalProviderPackage>> {
+        let root = root.as_ref();
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut packages = Vec::new();
+        for entry in fs::read_dir(root).map_err(|error| RuntimeError::Execution {
+            operation: "discover providers".to_owned(),
+            reason: error.to_string(),
+        })? {
+            let path = entry
+                .map_err(|error| RuntimeError::Execution {
+                    operation: "discover providers".to_owned(),
+                    reason: error.to_string(),
+                })?
+                .path();
+            if path.is_dir() && path.join("manifest.toml").is_file() {
+                packages.push(LocalProviderPackage::load(path)?);
+            }
+        }
+        packages.sort_by(|left, right| left.manifest.provider.id.cmp(&right.manifest.provider.id));
+        Ok(packages)
+    }
+
+    pub fn load_local_packages(&mut self, root: impl AsRef<Path>) -> RuntimeResult<Vec<String>> {
+        let packages = Self::discover_local_packages(root)?;
+        let ids = packages
+            .iter()
+            .map(|package| package.manifest.provider.id.clone())
+            .collect();
+        for package in packages {
+            self.register(ManifestCapabilityProvider::new(package));
+        }
+        Ok(ids)
     }
 
     pub fn get(&self, capability: &str) -> Option<Capability> {
@@ -791,5 +1077,46 @@ mod tests {
             result,
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn local_package_manifest_is_validated_and_discovered_without_execution() {
+        let root = std::env::temp_dir().join(format!("ml-runtime-provider-{}", unique_id()));
+        let package = root.join("example");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("manifest.toml"),
+            r#"
+[package]
+id = "example-capability"
+version = "0.1.0"
+runtime = ">=0.1.0"
+[provider]
+id = "example"
+version = "0.1.0"
+execution_targets = ["local"]
+platforms = ["linux"]
+backends = ["cpu"]
+configuration = ["token"]
+dependencies = ["network"]
+[[capabilities]]
+id = "example.run"
+version = "1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("provider"), b"not executed").unwrap();
+
+        let mut registry = CapabilityRegistry::new();
+        assert_eq!(
+            registry.load_local_packages(&root).unwrap(),
+            vec!["example".to_owned()]
+        );
+        assert_eq!(registry.get("example.run").unwrap().backend, "cpu");
+        assert_eq!(
+            registry.provider("example").unwrap().availability().state,
+            AvailabilityState::Registered
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

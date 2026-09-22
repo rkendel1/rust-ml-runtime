@@ -27,9 +27,11 @@ mod capability;
 
 pub use capability::{
     AvailabilityState, BuiltinCapabilityProvider, Capability, CapabilityAuthorizer,
-    CapabilityAvailability, CapabilityExecutionMetadata, CapabilityLimits, CapabilityPolicy,
-    CapabilityProvider, CapabilityRegistry, CapabilityResolution, ExecutionRequest,
-    ExecutionResult, ResolutionCandidate, ResolutionConstraints,
+    CapabilityAvailability, CapabilityExecutionMetadata, CapabilityLimits,
+    CapabilityPackageManifest, CapabilityPolicy, CapabilityProvider, CapabilityRegistry,
+    CapabilityResolution, ExecutionRequest, ExecutionResult, LocalProviderPackage,
+    ManifestCapabilityProvider, PackageCapability, PackageManifest, ProviderDescriptor,
+    ProviderManifest, ResolutionCandidate, ResolutionConstraints,
 };
 
 pub use ml_runtime_backend;
@@ -756,6 +758,16 @@ impl Runtime {
         &self.capability_registry
     }
 
+    /// Explicitly discovers and registers local capability package metadata.
+    ///
+    /// Discovery never loads or executes a provider binary.
+    pub fn load_capability_packages(
+        &mut self,
+        root: impl AsRef<std::path::Path>,
+    ) -> RuntimeResult<Vec<String>> {
+        self.capability_registry.load_local_packages(root)
+    }
+
     pub fn environment(&self) -> RuntimeEnvironment {
         RuntimeEnvironment::discover(
             self.capability_registry
@@ -787,9 +799,40 @@ impl Runtime {
         request: ExecutionRequest,
         authorizer: Option<&dyn CapabilityAuthorizer>,
     ) -> RuntimeResult<ExecutionResult> {
-        self.capability_registry
+        let resolution = self
+            .capability_registry
             .resolve(&request.capability, &ResolutionConstraints::default())?;
-        capability::execute(request, authorizer).await
+        let provider = self
+            .capability_registry
+            .provider(&resolution.provider)
+            .ok_or_else(|| {
+                RuntimeError::provider_unavailable(&resolution.provider, "not registered")
+            })?;
+        if resolution.provider == "builtin" {
+            capability::execute(request, authorizer).await
+        } else {
+            if let Some(authorizer) = authorizer {
+                if request.policy.require_authorization {
+                    let capability = self
+                        .capability_registry
+                        .get(&request.capability)
+                        .ok_or_else(|| RuntimeError::CapabilityMismatch {
+                            reason: format!("unknown capability {}", request.capability),
+                        })?;
+                    authorizer.authorize(&request, &capability).await?;
+                }
+            } else if self
+                .capability_registry
+                .get(&request.capability)
+                .is_some_and(|capability| !capability.requirements.is_empty())
+            {
+                return Err(RuntimeError::Execution {
+                    operation: request.capability,
+                    reason: "authorization required".to_owned(),
+                });
+            }
+            provider.execute(request).await
+        }
     }
 
     pub fn status(&self) -> RuntimeStatus {
