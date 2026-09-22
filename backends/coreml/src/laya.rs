@@ -34,8 +34,10 @@ struct CoreMlConfig {
     format: String,
     format_version: u32,
     #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     repository: Option<String>,
     #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     revision: Option<String>,
     package_sha256: Option<String>,
     shape: Shape,
@@ -192,6 +194,8 @@ impl LayaModel {
             mask: token_id("mask", &mask_text)?,
             mask_text,
         };
+        #[cfg(not(target_os = "macos"))]
+        let _ = &tokens;
         let model_path = if let Some(path) = prepared.as_ref() {
             path.clone()
         } else if root.join("model.mlmodelc").is_dir() {
@@ -493,10 +497,13 @@ fn prepared_artifact(root: &Path) -> RuntimeResult<Option<PathBuf>> {
 
 pub(crate) fn prepare(root: &Path) -> RuntimeResult<super::PreparedCoreMlArtifact> {
     #[cfg(not(target_os = "macos"))]
-    return Err(RuntimeError::backend_unavailable(
-        "coreml",
-        "Laya requires macOS; this platform cannot compile Core ML models",
-    ));
+    {
+        let _ = root;
+        Err(RuntimeError::backend_unavailable(
+            "coreml",
+            "Laya requires macOS; this platform cannot compile Core ML models",
+        ))
+    }
     #[cfg(target_os = "macos")]
     {
         let manifest = root.join(INSTALLATION_MANIFEST_FILE);
@@ -560,7 +567,7 @@ pub(crate) fn remove_prepared(root: &Path) -> RuntimeResult<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = root;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -590,10 +597,11 @@ pub(crate) fn remove_prepared(root: &Path) -> RuntimeResult<()> {
                 reason: error.to_string(),
             })?;
         }
+        Ok(())
     }
-    Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn artifact_hash_for(config: &CoreMlConfig, root: &Path) -> RuntimeResult<String> {
     match config.package_sha256.clone() {
         Some(hash) => Ok(hash),
@@ -1125,6 +1133,7 @@ fn tree_digest(root: &Path) -> RuntimeResult<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[cfg(target_os = "macos")]
 fn hash_directory(root: &Path) -> RuntimeResult<String> {
     tree_digest(root)
 }
