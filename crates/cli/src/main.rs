@@ -337,9 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let capability = runtime
                 .capability(&capability)
                 .ok_or_else(|| format!("unknown capability: {capability}"))?;
-            let resolution = runtime.resolve_capability(
-                &ml_runtime::ExecutionRequest::new(&capability.id, serde_json::Value::Null),
-            )?;
+            let resolution = runtime.resolve_capability(&ml_runtime::ExecutionRequest::new(
+                &capability.id,
+                serde_json::Value::Null,
+            ))?;
             if json {
                 println!(
                     "{}",

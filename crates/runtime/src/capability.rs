@@ -236,7 +236,8 @@ impl CapabilityRegistry {
                 rejected.push("network forbidden".to_owned());
             }
             if constraints.filesystem_scope.is_some() && !metadata.category.eq("filesystem") {
-                rejected.push("filesystem scope applies only to filesystem capabilities".to_owned());
+                rejected
+                    .push("filesystem scope applies only to filesystem capabilities".to_owned());
             }
             if constraints.maximum_latency_ms.is_some() {
                 rejected.push("latency is not declared by implementation".to_owned());
