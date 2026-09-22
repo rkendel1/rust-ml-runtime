@@ -337,14 +337,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let capability = runtime
                 .capability(&capability)
                 .ok_or_else(|| format!("unknown capability: {capability}"))?;
+            let resolution = runtime.resolve_capability(
+                &ml_runtime::ExecutionRequest::new(&capability.id, serde_json::Value::Null),
+            )?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&capability)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "capability": capability,
+                        "resolution": resolution,
+                    }))?
+                );
             } else {
                 println!(
                     "{}\tversion={}\tavailable={}",
                     capability.id, capability.version, capability.availability
                 );
                 println!("{}", capability.description);
+                println!("Selected provider: {}", resolution.provider);
+                println!("Resolution: {}", resolution.reason);
             }
         }
         Commands::Capabilities {
@@ -382,6 +393,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         "catalog directory not found (create it to install models)"
                     },
+                ),
+                (
+                    "environment",
+                    !capabilities.environment.platform.is_empty(),
+                    "discovered",
                 ),
             ];
             let healthy = checks.iter().all(|(_, ok, _)| *ok);
@@ -734,6 +750,12 @@ fn render_capabilities(
             .platforms
             .first()
             .unwrap_or(&ml_runtime::Platform::Unknown)
+    );
+    println!(
+        "Environment: {} {} ({})",
+        capabilities.environment.operating_system,
+        capabilities.environment.architecture,
+        capabilities.environment.cpu
     );
     println!("Backends:");
     for backend in &capabilities.backends {

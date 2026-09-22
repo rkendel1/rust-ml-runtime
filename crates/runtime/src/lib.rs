@@ -26,8 +26,10 @@ use tokio_stream::wrappers::ReceiverStream;
 mod capability;
 
 pub use capability::{
-    Capability, CapabilityAuthorizer, CapabilityExecutionMetadata, CapabilityLimits,
-    CapabilityPolicy, ExecutionRequest, ExecutionResult,
+    AvailabilityState, BuiltinCapabilityProvider, Capability, CapabilityAuthorizer,
+    CapabilityAvailability, CapabilityExecutionMetadata, CapabilityLimits, CapabilityPolicy,
+    CapabilityProvider, CapabilityRegistry, CapabilityResolution, ExecutionRequest,
+    ExecutionResult, ResolutionCandidate, ResolutionConstraints,
 };
 
 pub use ml_runtime_backend;
@@ -84,11 +86,72 @@ pub struct ModelCapability {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeCapabilities {
+    pub environment: RuntimeEnvironment,
     pub platforms: Vec<Platform>,
     pub providers: Vec<ProviderCapability>,
     pub backends: Vec<BackendCapability>,
     pub models: Vec<ModelCapability>,
     pub capabilities: Vec<Capability>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEnvironment {
+    pub platform: String,
+    pub architecture: String,
+    pub operating_system: String,
+    pub cpu: String,
+    pub memory_bytes: Option<u64>,
+    pub accelerators: Vec<String>,
+    pub filesystem: String,
+    pub network: String,
+    pub developer_tools: Vec<String>,
+    pub installed_providers: Vec<String>,
+}
+
+impl RuntimeEnvironment {
+    pub fn discover(provider_ids: Vec<String>) -> Self {
+        Self {
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            operating_system: std::env::consts::OS.to_owned(),
+            cpu: std::thread::available_parallelism()
+                .map(|count| format!("{} logical cores", count.get()))
+                .unwrap_or_else(|_| "unknown".to_owned()),
+            memory_bytes: available_memory_bytes(),
+            accelerators: Vec::new(),
+            filesystem: std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unavailable".to_owned()),
+            network: "available by explicit policy".to_owned(),
+            developer_tools: ["git"]
+                .iter()
+                .filter(|tool| command_available(tool))
+                .map(|tool| (*tool).to_owned())
+                .collect(),
+            installed_providers: provider_ids,
+        }
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn available_memory_bytes() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    contents.lines().find_map(|line| {
+        let value = line
+            .strip_prefix("MemTotal:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        Some(value * 1024)
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -412,6 +475,7 @@ pub struct RuntimeBuilder {
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
+    capability_registry: CapabilityRegistry,
 }
 
 impl Default for RuntimeBuilder {
@@ -421,6 +485,7 @@ impl Default for RuntimeBuilder {
             backends: BTreeMap::new(),
             providers: BTreeMap::new(),
             catalog: None,
+            capability_registry: CapabilityRegistry::with_builtins(),
         };
         builder
             .backends
@@ -536,12 +601,21 @@ impl RuntimeBuilder {
         self
     }
 
+    pub fn register_capability_provider<P>(mut self, provider: P) -> Self
+    where
+        P: CapabilityProvider + 'static,
+    {
+        self.capability_registry.register(provider);
+        self
+    }
+
     pub fn build(self) -> Runtime {
         Runtime {
             config: self.config.clone(),
             backends: self.backends,
             providers: self.providers,
             catalog: self.catalog,
+            capability_registry: self.capability_registry,
             loaded_models: RwLock::new(HashMap::new()),
             inference_semaphore: Arc::new(Semaphore::new(
                 self.config.max_concurrent_inferences.max(1),
@@ -567,6 +641,7 @@ pub struct Runtime {
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
+    capability_registry: CapabilityRegistry,
     loaded_models: RwLock<HashMap<ModelCacheKey, LoadedModel>>,
     inference_semaphore: Arc<Semaphore>,
     load_semaphore: Arc<Semaphore>,
@@ -664,16 +739,47 @@ impl Runtime {
 
     pub fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
+            environment: self.environment(),
             platforms: vec![Platform::current()],
             providers: self.providers().providers,
             backends: self.backends().backends,
             models: self.models().models,
-            capabilities: capability::catalog(),
+            capabilities: self.capability_registry.list(),
         }
     }
 
     pub fn capability(&self, id: &str) -> Option<Capability> {
-        capability::find(id)
+        self.capability_registry.get(id)
+    }
+
+    pub fn capability_registry(&self) -> &CapabilityRegistry {
+        &self.capability_registry
+    }
+
+    pub fn environment(&self) -> RuntimeEnvironment {
+        RuntimeEnvironment::discover(
+            self.capability_registry
+                .providers()
+                .iter()
+                .map(|provider| provider.id().to_owned())
+                .collect(),
+        )
+    }
+
+    pub fn resolve_capability(
+        &self,
+        request: &ExecutionRequest,
+    ) -> RuntimeResult<CapabilityResolution> {
+        self.resolve_capability_with_constraints(request, &ResolutionConstraints::default())
+    }
+
+    pub fn resolve_capability_with_constraints(
+        &self,
+        request: &ExecutionRequest,
+        constraints: &ResolutionConstraints,
+    ) -> RuntimeResult<CapabilityResolution> {
+        self.capability_registry
+            .resolve(&request.capability, constraints)
     }
 
     pub async fn execute_capability(
@@ -681,6 +787,8 @@ impl Runtime {
         request: ExecutionRequest,
         authorizer: Option<&dyn CapabilityAuthorizer>,
     ) -> RuntimeResult<ExecutionResult> {
+        self.capability_registry
+            .resolve(&request.capability, &ResolutionConstraints::default())?;
         capability::execute(request, authorizer).await
     }
 

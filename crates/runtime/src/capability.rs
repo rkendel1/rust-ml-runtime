@@ -4,8 +4,10 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     process::Stdio,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -29,6 +31,266 @@ pub struct Capability {
     pub local: bool,
     pub remote: bool,
     pub resource_requirements: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AvailabilityState {
+    Registered,
+    Available,
+    Ready,
+    Healthy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityAvailability {
+    pub state: AvailabilityState,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolutionConstraints {
+    pub local_only: bool,
+    pub remote_allowed: bool,
+    pub provider: Option<String>,
+    pub backend: Option<String>,
+    pub platform: Option<String>,
+    pub maximum_latency_ms: Option<u64>,
+    pub maximum_memory_bytes: Option<u64>,
+    pub network_required: bool,
+    pub network_forbidden: bool,
+    pub filesystem_scope: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolutionCandidate {
+    pub provider: String,
+    pub implementation: String,
+    pub version: String,
+    pub available: bool,
+    pub local: bool,
+    pub requirements_satisfied: Vec<String>,
+    pub requirements_rejected: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityResolution {
+    pub capability: String,
+    pub provider: String,
+    pub implementation: String,
+    pub target: String,
+    pub version: String,
+    pub candidates: Vec<ResolutionCandidate>,
+    pub reason: String,
+}
+
+#[async_trait]
+pub trait CapabilityProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn version(&self) -> &str;
+    fn capabilities(&self) -> Vec<Capability>;
+    fn availability(&self) -> CapabilityAvailability;
+    async fn execute(&self, request: ExecutionRequest) -> RuntimeResult<ExecutionResult>;
+}
+
+pub struct BuiltinCapabilityProvider;
+
+#[async_trait]
+impl CapabilityProvider for BuiltinCapabilityProvider {
+    fn id(&self) -> &str {
+        "builtin"
+    }
+
+    fn version(&self) -> &str {
+        "1"
+    }
+
+    fn capabilities(&self) -> Vec<Capability> {
+        catalog()
+    }
+
+    fn availability(&self) -> CapabilityAvailability {
+        CapabilityAvailability {
+            state: AvailabilityState::Available,
+            reason: "built-in capability implementation".to_owned(),
+        }
+    }
+
+    async fn execute(&self, request: ExecutionRequest) -> RuntimeResult<ExecutionResult> {
+        execute(request, None).await
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct CapabilityRegistry {
+    providers: BTreeMap<String, Arc<dyn CapabilityProvider>>,
+}
+
+impl CapabilityRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_builtins() -> Self {
+        let mut registry = Self::new();
+        registry.register(BuiltinCapabilityProvider);
+        registry
+    }
+
+    pub fn register<P>(&mut self, provider: P)
+    where
+        P: CapabilityProvider + 'static,
+    {
+        self.providers
+            .insert(provider.id().to_owned(), Arc::new(provider));
+    }
+
+    pub fn register_arc(&mut self, provider: Arc<dyn CapabilityProvider>) {
+        self.providers.insert(provider.id().to_owned(), provider);
+    }
+
+    pub fn unregister(&mut self, provider: &str) -> Option<Arc<dyn CapabilityProvider>> {
+        self.providers.remove(provider)
+    }
+
+    pub fn provider(&self, provider: &str) -> Option<&Arc<dyn CapabilityProvider>> {
+        self.providers.get(provider)
+    }
+
+    pub fn providers(&self) -> Vec<Arc<dyn CapabilityProvider>> {
+        self.providers.values().cloned().collect()
+    }
+
+    pub fn get(&self, capability: &str) -> Option<Capability> {
+        self.list().into_iter().find(|item| item.id == capability)
+    }
+
+    pub fn list(&self) -> Vec<Capability> {
+        let mut capabilities = BTreeMap::new();
+        for provider in self.providers.values() {
+            for capability in provider.capabilities() {
+                capabilities
+                    .entry(capability.id.clone())
+                    .or_insert(capability);
+            }
+        }
+        capabilities.into_values().collect()
+    }
+
+    pub fn find(&self, query: &str) -> Vec<Capability> {
+        self.list()
+            .into_iter()
+            .filter(|capability| {
+                capability.id.contains(query)
+                    || capability.category.contains(query)
+                    || capability.description.contains(query)
+            })
+            .collect()
+    }
+
+    fn implementations(&self, capability: &str) -> Vec<Arc<dyn CapabilityProvider>> {
+        self.providers
+            .values()
+            .filter(|provider| {
+                provider
+                    .capabilities()
+                    .iter()
+                    .any(|item| item.id == capability)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn resolve(
+        &self,
+        capability: &str,
+        constraints: &ResolutionConstraints,
+    ) -> RuntimeResult<CapabilityResolution> {
+        let mut candidates = Vec::new();
+        for provider in self.implementations(capability) {
+            let metadata = provider
+                .capabilities()
+                .into_iter()
+                .find(|item| item.id == capability)
+                .expect("provider capability disappeared");
+            let availability = provider.availability();
+            let mut satisfied = Vec::new();
+            let mut rejected = Vec::new();
+            if availability.state != AvailabilityState::Registered && metadata.availability {
+                satisfied.push("available".to_owned());
+            } else {
+                rejected.push("provider unavailable".to_owned());
+            }
+            if constraints.local_only && !metadata.local {
+                rejected.push("local_only".to_owned());
+            } else if metadata.local {
+                satisfied.push("local".to_owned());
+            }
+            if !constraints.remote_allowed && !metadata.local {
+                rejected.push("remote forbidden".to_owned());
+            }
+            if constraints.network_required && !metadata.remote {
+                rejected.push("network required".to_owned());
+            }
+            if constraints.network_forbidden && metadata.remote {
+                rejected.push("network forbidden".to_owned());
+            }
+            if constraints.filesystem_scope.is_some() && !metadata.category.eq("filesystem") {
+                rejected.push("filesystem scope applies only to filesystem capabilities".to_owned());
+            }
+            if constraints.maximum_latency_ms.is_some() {
+                rejected.push("latency is not declared by implementation".to_owned());
+            }
+            if constraints.maximum_memory_bytes.is_some() {
+                rejected.push("memory usage is not declared by implementation".to_owned());
+            }
+            if let Some(expected) = &constraints.provider {
+                if provider.id() != expected {
+                    rejected.push(format!("provider != {expected}"));
+                }
+            }
+            if let Some(expected) = &constraints.backend {
+                if metadata.backend != *expected {
+                    rejected.push(format!("backend != {expected}"));
+                }
+            }
+            if let Some(expected) = &constraints.platform {
+                if metadata.platform != *expected {
+                    rejected.push(format!("platform != {expected}"));
+                }
+            }
+            let available = rejected.is_empty();
+            candidates.push(ResolutionCandidate {
+                provider: provider.id().to_owned(),
+                implementation: metadata.backend.clone(),
+                version: provider.version().to_owned(),
+                available,
+                local: metadata.local,
+                requirements_satisfied: satisfied,
+                requirements_rejected: rejected,
+                reason: if available {
+                    "satisfies constraints".to_owned()
+                } else {
+                    "rejected by constraints".to_owned()
+                },
+            });
+        }
+        let selected = candidates
+            .iter()
+            .find(|candidate| candidate.available)
+            .ok_or_else(|| RuntimeError::CapabilityMismatch {
+                reason: format!("no available provider satisfies constraints for {capability}"),
+            })?;
+        Ok(CapabilityResolution {
+            capability: capability.to_owned(),
+            provider: selected.provider.clone(),
+            implementation: selected.implementation.clone(),
+            target: if selected.local { "local" } else { "remote" }.to_owned(),
+            version: selected.version.clone(),
+            candidates,
+            reason: "selected first available provider in registry order".to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -497,5 +759,36 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, RuntimeError::Execution { .. }));
+    }
+
+    #[test]
+    fn registry_resolves_and_explains_builtin_capabilities() {
+        let registry = CapabilityRegistry::with_builtins();
+        let result = registry
+            .resolve("data.parse", &ResolutionConstraints::default())
+            .unwrap();
+        assert_eq!(result.provider, "builtin");
+        assert_eq!(result.target, "local");
+        assert_eq!(result.candidates.len(), 1);
+        assert!(result.candidates[0]
+            .requirements_satisfied
+            .iter()
+            .any(|requirement| requirement == "available"));
+    }
+
+    #[test]
+    fn registry_rejects_local_only_for_remote_capabilities() {
+        let registry = CapabilityRegistry::with_builtins();
+        let result = registry.resolve(
+            "data.parse",
+            &ResolutionConstraints {
+                provider: Some("remote".to_owned()),
+                ..ResolutionConstraints::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
     }
 }
