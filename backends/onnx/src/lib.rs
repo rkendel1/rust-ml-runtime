@@ -29,7 +29,7 @@ impl OnnxBackend {
             });
         };
         Session::builder()
-            .and_then(|mut builder| builder.commit_from_file(path))
+            .and_then(|builder| builder.commit_from_file(path))
             .map_err(|error| RuntimeError::execution("load", format!("load ONNX model: {error}")))
     }
 }
@@ -104,9 +104,9 @@ impl Backend for OnnxBackend {
             .lock()
             .map_err(|_| RuntimeError::execution("infer", "ONNX session lock poisoned"))?;
         let input_name = session
-            .inputs()
+            .inputs
             .first()
-            .map(|input| input.name().to_owned())
+            .map(|input| input.name.to_owned())
             .ok_or_else(|| RuntimeError::execution("infer", "ONNX model has no inputs"))?;
         let tensor = OrtTensor::from_array((input.shape.clone(), input.values.clone())).map_err(
             |error| RuntimeError::execution("infer", format!("create ONNX input: {error}")),
