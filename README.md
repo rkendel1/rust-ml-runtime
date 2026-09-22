@@ -1,25 +1,53 @@
-# ML Runtime
+# rust-ml-runtime
 
-`ml-runtime` is a Rust-native capability runtime for intelligent applications.
-ML was the initial capability family; the runtime now provides common discovery,
-execution, policy, limits, and evidence for intelligence, data, filesystem,
-process, network, and developer-tool capabilities.
-The supported developer surfaces are the `ml-runtime` executable, the Rust
-runtime crate, and the thin `@ml-runtime/core` TypeScript package.
+A native local ML runtime for applications — no Python required.
+
+`rust-ml-runtime` installs verified models, executes them locally, and returns
+typed decisions with probabilities and provenance. The supported developer
+surfaces are the `ml-runtime` executable, the Rust runtime crate, and the
+in-process `@rust-ml-runtime/node` package.
+
+## Quick start
+
+```sh
+# install ml-runtime (see the platform commands below)
+ml-runtime --version
+# install a model
+ml-runtime model install laya
+# verify
+ml-runtime model doctor laya
+# run local inference
+ml-runtime laya "The customer asks for a refund."
+```
+
+The runtime and installed model execute locally. The first product path uses
+Laya through Core ML on macOS; Linux and Windows receive the native runtime but
+cannot execute this Core ML model. Model installation may use the network,
+while inference from a READY installation does not.
 
 ## Install
 
-The most reproducible installation is a release archive from GitHub Releases.
-Archives contain `ml-runtime`, the example model catalog, this README, and
-`LICENSE`. Verify downloads with:
+The quickest installation on macOS and Linux is the verified installer:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSfL \
+  https://raw.githubusercontent.com/rkendel1/rust-ml-runtime/main/install.sh | sh
+```
+
+The most reproducible manual installation is a release archive from GitHub Releases.
+CLI archives contain `ml-runtime`, this README, and `LICENSE`. The public Node
+package selects a separate platform-specific Node-API package; large model
+artifacts are installed separately. Verify release downloads with:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
 ```
 
 For development, build the same executable with `cargo build --release -p ml-runtime-cli`.
+See the [native installation guide](docs/install.md) for supported archives,
+the Python-free Laya lifecycle, storage locations, and diagnostics.
 
-## Quickstart
+## General runtime commands
 
 ```sh
 ml-runtime --version
@@ -56,14 +84,41 @@ let result = runtime.infer(request).await?;
 
 Developer documentation is organized from usage toward implementation:
 
-1. [Quickstart and core API](docs/api.md#quickstart)
-2. [Models and lifecycle](docs/models.md)
-3. [Execution policies and metadata](docs/api.md#execution-policies-and-metadata)
-4. [Streaming](docs/api.md#streaming)
-5. [Batching](docs/api.md#batching)
-6. [Remote execution](docs/api.md#remote-execution)
-7. [Observability](docs/observability.md)
-8. [Architecture](docs/architecture.md)
+1. [Native installation](docs/install.md)
+2. [Node and TypeScript](docs/node.md)
+3. [Release process](docs/release.md)
+4. [Models and lifecycle](docs/models.md)
+5. [Core API](docs/api.md#quickstart)
+6. [Architecture](docs/architecture.md)
+
+## Public architecture
+
+```text
+Application
+    │
+    ▼
+Node API / downstream consumers (for example, Jev)
+    │
+    ▼
+rust-ml-runtime
+    ├── model lifecycle
+    ├── preprocessing
+    ├── tokenizer
+    ├── decoding
+    └── provenance
+    │
+    ▼
+Backend
+    │
+    ▼
+Model
+```
+
+The boundaries are intentional: Model ≠ Runtime, Backend ≠ Runtime, Runtime ≠
+Jev, and Jev ≠ Authority. Core ML is the first distributable backend and Laya
+is the first demonstrated model; neither defines the public runtime
+abstraction. Application policy and authorization remain application-owned.
+Jev is a downstream consumer and is not part of the runtime release gate.
 
 ## Release surface and compatibility
 
@@ -92,15 +147,20 @@ directory, then execute it without Python or a Hugging Face CLI:
 
 ```text
 ml-runtime model install laya
+ml-runtime model list
 ml-runtime laya "The customer asks for a refund."
+ml-runtime model doctor laya
 ```
 
 `ML_RUNTIME_MODEL_DIR` overrides the installed-model root. Development and
 offline tests can override the registry source with `--source ./models/laya`
 or `ML_RUNTIME_LAYA_SOURCE`; normal installation uses the registry's pinned
-HTTPS snapshot. The authoritative artifact remains `model.mlpackage` plus its
-tokenizer and configuration. Core ML's compiled representation is disposable
-runtime state under the runtime cache and is never used as package identity.
+HTTPS snapshot. Installation compiles and validates Core ML before publishing a
+READY installation manifest. Normal inference only loads that prepared
+artifact and never silently compiles or repairs it. The authoritative artifact
+remains `model.mlpackage` plus its tokenizer and configuration. Core ML's
+compiled representation is disposable runtime state under the runtime cache
+and is never used as package identity.
 
 The server owns model packages and clients send model identities, not server
 filesystem paths:
@@ -109,17 +169,19 @@ filesystem paths:
 ml-runtime serve --bind 127.0.0.1:8080 --models models
 ```
 
-TypeScript is intentionally a thin wrapper over the Rust CLI and requires a
-separately installed `ml-runtime`; it does not embed a native inference engine:
+Node and TypeScript applications load the same Rust runtime in-process:
 
 ```ts
-import { RuntimeClient } from "@ml-runtime/core";
+import { LocalML } from "@rust-ml-runtime/node";
 ```
+
+See [Node and TypeScript](docs/node.md), [installation](docs/install.md), and
+the [release contract](docs/release.md).
 
 ## Supported platforms
 
-Release builds target Linux x86_64, Linux ARM64, macOS Intel, and macOS Apple
-Silicon when the corresponding CI job passes. CPU inference is available
+Release builds target Linux x86_64, Linux ARM64, macOS Intel, macOS Apple
+Silicon, and Windows x86_64 when the corresponding CI job passes. CPU inference is available
 without Core ML. Core ML is macOS-only; GPU, WebGPU/WASM, and CUDA support may
 be unavailable or experimental depending on the build. Check
 `ml-runtime capabilities` rather than assuming a backend is present.

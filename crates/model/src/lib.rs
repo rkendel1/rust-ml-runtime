@@ -1140,6 +1140,75 @@ pub struct RegisteredModelFile {
     pub sha256: String,
 }
 
+pub const INSTALLATION_MANIFEST_FILE: &str = "installation.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompiledStatus {
+    Ready,
+    Missing,
+    Corrupt,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompiledArtifactManifest {
+    pub path: PathBuf,
+    pub identity: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallationManifest {
+    pub schema_version: u32,
+    pub model: String,
+    pub model_revision: String,
+    pub model_checksum: String,
+    pub runtime_version: String,
+    pub runtime_requirement: String,
+    pub backend: String,
+    pub os: String,
+    pub architecture: String,
+    pub installed_at_unix_seconds: u64,
+    pub compiled_status: CompiledStatus,
+    pub compiled_artifact: Option<CompiledArtifactManifest>,
+}
+
+impl InstallationManifest {
+    pub fn read(package: &Path) -> Result<Self, AcquisitionError> {
+        let path = package.join(INSTALLATION_MANIFEST_FILE);
+        let bytes = fs::read(&path).map_err(|error| AcquisitionError::InvalidPackage {
+            path: path.clone(),
+            reason: format!(
+                "installation is not ready: {error}; run `ml-runtime model doctor {}`",
+                package
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("MODEL")
+            ),
+        })?;
+        serde_json::from_slice(&bytes).map_err(|error| AcquisitionError::InvalidPackage {
+            path,
+            reason: format!("invalid installation manifest: {error}"),
+        })
+    }
+
+    pub fn write_atomic(&self, package: &Path) -> Result<(), AcquisitionError> {
+        let destination = package.join(INSTALLATION_MANIFEST_FILE);
+        let temporary = package.join(format!(".{INSTALLATION_MANIFEST_FILE}.tmp"));
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| AcquisitionError::InvalidRequest(error.to_string()))?;
+        let mut output = fs::File::create(&temporary)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        output
+            .write_all(&bytes)
+            .and_then(|()| output.sync_all())
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        fs::rename(&temporary, &destination)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BuiltinModelRegistry;
 
@@ -1545,7 +1614,7 @@ fn write_registered_manifest(
     .map_err(|error| AcquisitionError::Io(error.to_string()))
 }
 
-fn runtime_requirement_satisfied(requirement: &str, current: &str) -> bool {
+pub fn runtime_requirement_satisfied(requirement: &str, current: &str) -> bool {
     let Some(required) = requirement.strip_prefix(">=") else {
         return requirement == current || requirement == "*";
     };
@@ -1615,8 +1684,9 @@ impl std::fmt::Debug for ModelHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactSpec, BuiltinModelRegistry, FilesystemModelCatalog, InstallMode, ModelCatalog,
-        ModelFormat, ModelManifest, ModelReference, RegisteredModel, RegisteredModelFile,
+        ArtifactSpec, BuiltinModelRegistry, CompiledArtifactManifest, CompiledStatus,
+        FilesystemModelCatalog, InstallMode, InstallationManifest, ModelCatalog, ModelFormat,
+        ModelManifest, ModelReference, RegisteredModel, RegisteredModelFile,
         RegisteredModelInstaller,
     };
     use std::{fs, path::PathBuf};
@@ -1642,6 +1712,36 @@ mod tests {
             .iter()
             .any(|file| file.path.ends_with("weights/weight.bin")));
         assert!(BuiltinModelRegistry.resolve("missing").is_err());
+    }
+
+    #[test]
+    fn installation_manifest_round_trips_atomically() {
+        let root = std::env::temp_dir().join(format!(
+            "ml-runtime-installation-manifest-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest = InstallationManifest {
+            schema_version: 1,
+            model: "laya".to_owned(),
+            model_revision: "revision".to_owned(),
+            model_checksum: "model-hash".to_owned(),
+            runtime_version: "0.1.0".to_owned(),
+            runtime_requirement: ">=0.1.0".to_owned(),
+            backend: "coreml".to_owned(),
+            os: "macos".to_owned(),
+            architecture: "aarch64".to_owned(),
+            installed_at_unix_seconds: 1,
+            compiled_status: CompiledStatus::Ready,
+            compiled_artifact: Some(CompiledArtifactManifest {
+                path: root.join("compiled.mlmodelc"),
+                identity: "compiled-hash".to_owned(),
+            }),
+        };
+        manifest.write_atomic(&root).unwrap();
+        assert_eq!(InstallationManifest::read(&root).unwrap(), manifest);
+        assert!(!root.join(".installation.json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

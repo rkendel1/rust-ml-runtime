@@ -1,0 +1,10 @@
+{
+  "name": "@rust-ml-runtime/node-win32-x64-msvc",
+  "version": "0.1.0",
+  "description": "Windows x64 native binary for @rust-ml-runtime/node",
+  "main": "ml_runtime_node.node",
+  "files": ["ml_runtime_node.node"],
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "license": "MIT"
+}

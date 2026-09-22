@@ -11,6 +11,7 @@ use ml_runtime_inference::{
     DecisionExecution, DecisionProvenance, DecisionRequest, DecisionResult, DecisionType,
     DecisionValue, ModelDescription, ModelIdentity, TypedDecision,
 };
+use ml_runtime_model::{CompiledStatus, InstallationManifest, INSTALLATION_MANIFEST_FILE};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -144,16 +145,20 @@ impl LayaModel {
             });
         }
         validate_shape(&config.shape)?;
-        validate_files(&root, &config.files, config.package_sha256.is_some())?;
-        if let Some(expected) = config.package_sha256.as_deref() {
-            let package = root.join("model.mlpackage");
-            if package.is_dir() {
-                let actual = tree_digest(&package)?;
-                if !actual.eq_ignore_ascii_case(expected) {
-                    return Err(RuntimeError::ModelIntegrity {
-                        model: root.display().to_string(),
-                        reason: "Core ML package hash does not match coreml_config.json".to_owned(),
-                    });
+        let prepared = prepared_artifact(&root)?;
+        if prepared.is_none() {
+            validate_files(&root, &config.files, config.package_sha256.is_some())?;
+            if let Some(expected) = config.package_sha256.as_deref() {
+                let package = root.join("model.mlpackage");
+                if package.is_dir() {
+                    let actual = tree_digest(&package)?;
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        return Err(RuntimeError::ModelIntegrity {
+                            model: root.display().to_string(),
+                            reason: "Core ML package hash does not match coreml_config.json"
+                                .to_owned(),
+                        });
+                    }
                 }
             }
         }
@@ -187,7 +192,9 @@ impl LayaModel {
             mask: token_id("mask", &mask_text)?,
             mask_text,
         };
-        let model_path = if root.join("model.mlmodelc").is_dir() {
+        let model_path = if let Some(path) = prepared.as_ref() {
+            path.clone()
+        } else if root.join("model.mlmodelc").is_dir() {
             root.join("model.mlmodelc")
         } else if root.join("model.mlpackage").is_dir() {
             root.join("model.mlpackage")
@@ -199,7 +206,18 @@ impl LayaModel {
         #[cfg(not(target_os = "macos"))]
         let _ = &model_path;
         #[cfg(target_os = "macos")]
-        let native = load_native_model(&model_path, &artifact_hash_for(&config, &root)?)?;
+        let native = if prepared.is_some() {
+            super::native::load_cpu_gpu(&model_path).map_err(|error| {
+                RuntimeError::ModelIntegrity {
+                    model: root.display().to_string(),
+                    reason: format!(
+                        "compiled Core ML artifact is invalid: {error}; run `ml-runtime model doctor laya`"
+                    ),
+                }
+            })?
+        } else {
+            load_native_model(&model_path, &artifact_hash_for(&config, &root)?)?
+        };
         #[cfg(target_os = "macos")]
         validate_native_schema(&native.schema, &config.shape)?;
         #[cfg(not(target_os = "macos"))]
@@ -428,6 +446,152 @@ impl LayaModel {
         #[cfg(not(target_os = "macos"))]
         unreachable!()
     }
+}
+
+fn prepared_artifact(root: &Path) -> RuntimeResult<Option<PathBuf>> {
+    if !root.join(INSTALLATION_MANIFEST_FILE).is_file() {
+        return Ok(None);
+    }
+    let manifest =
+        InstallationManifest::read(root).map_err(|error| RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: format!("{error}; run `ml-runtime model doctor laya`"),
+        })?;
+    if manifest.compiled_status != CompiledStatus::Ready {
+        return Err(RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: "model is not compiled; run `ml-runtime model doctor laya`".to_owned(),
+        });
+    }
+    let compiled = manifest
+        .compiled_artifact
+        .ok_or_else(|| RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason:
+                "installation manifest has no compiled artifact; run `ml-runtime model doctor laya`"
+                    .to_owned(),
+        })?;
+    #[cfg(target_os = "macos")]
+    if compiled_cache_path(&manifest.model_checksum).as_deref() != Some(compiled.path.as_path()) {
+        return Err(RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: "compiled artifact path does not match the runtime cache layout; run `ml-runtime model doctor laya`"
+                .to_owned(),
+        });
+    }
+    if !compiled.path.is_dir() {
+        return Err(RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: format!(
+                "compiled artifact is missing at {}; run `ml-runtime model doctor laya`",
+                compiled.path.display()
+            ),
+        });
+    }
+    Ok(Some(compiled.path))
+}
+
+pub(crate) fn prepare(root: &Path) -> RuntimeResult<super::PreparedCoreMlArtifact> {
+    #[cfg(not(target_os = "macos"))]
+    return Err(RuntimeError::backend_unavailable(
+        "coreml",
+        "Laya requires macOS; this platform cannot compile Core ML models",
+    ));
+    #[cfg(target_os = "macos")]
+    {
+        let manifest = root.join(INSTALLATION_MANIFEST_FILE);
+        if manifest.exists() {
+            fs::remove_file(&manifest).map_err(|error| RuntimeError::Execution {
+                operation: "prepare Core ML model".to_owned(),
+                reason: format!("remove stale {}: {error}", manifest.display()),
+            })?;
+        }
+        let loaded = LayaModel::load(root)?;
+        let path = compiled_cache_path(&loaded.artifact_hash).ok_or_else(|| {
+            RuntimeError::execution(
+                "Core ML model preparation",
+                "cannot determine compiled cache directory; set ML_RUNTIME_CACHE_DIR",
+            )
+        })?;
+        if !path.is_dir() {
+            return Err(RuntimeError::execution(
+                "Core ML model preparation",
+                "Core ML compilation did not produce a persistent artifact",
+            ));
+        }
+        let compiled_identity = tree_digest(&path)?;
+        Ok(super::PreparedCoreMlArtifact {
+            path,
+            model_identity: loaded.artifact_hash.clone(),
+            compiled_identity,
+        })
+    }
+}
+
+pub(crate) fn validate_prepared(root: &Path) -> RuntimeResult<super::PreparedCoreMlArtifact> {
+    let loaded = LayaModel::load(root)?;
+    let manifest =
+        InstallationManifest::read(root).map_err(|error| RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let compiled = manifest
+        .compiled_artifact
+        .ok_or_else(|| RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: "installation manifest has no compiled artifact".to_owned(),
+        })?;
+    let path = compiled.path;
+    let actual = tree_digest(&path)?;
+    if !actual.eq_ignore_ascii_case(&compiled.identity) {
+        return Err(RuntimeError::ModelIntegrity {
+            model: root.display().to_string(),
+            reason: "compiled artifact identity does not match installation manifest".to_owned(),
+        });
+    }
+    Ok(super::PreparedCoreMlArtifact {
+        compiled_identity: actual,
+        model_identity: loaded.artifact_hash,
+        path,
+    })
+}
+
+pub(crate) fn remove_prepared(root: &Path) -> RuntimeResult<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let config: CoreMlConfig = read_json(&root.join("coreml_config.json"))?;
+        let expected =
+            compiled_cache_path(&artifact_hash_for(&config, root)?).ok_or_else(|| {
+                RuntimeError::execution(
+                    "remove compiled Core ML artifact",
+                    "cannot determine the runtime cache directory",
+                )
+            })?;
+        if let Ok(manifest) = InstallationManifest::read(root) {
+            if manifest
+                .compiled_artifact
+                .is_some_and(|compiled| compiled.path != expected)
+            {
+                return Err(RuntimeError::ModelIntegrity {
+                    model: root.display().to_string(),
+                    reason: "installation manifest points outside the expected compiled cache path"
+                        .to_owned(),
+                });
+            }
+        }
+        if expected.is_dir() {
+            fs::remove_dir_all(&expected).map_err(|error| RuntimeError::Execution {
+                operation: "remove compiled Core ML artifact".to_owned(),
+                reason: error.to_string(),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn artifact_hash_for(config: &CoreMlConfig, root: &Path) -> RuntimeResult<String> {

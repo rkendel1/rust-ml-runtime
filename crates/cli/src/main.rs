@@ -3,10 +3,9 @@ use ml_runtime::ml_runtime_inference::{
     ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime::ml_runtime_model::{
-    default_model_root, BuiltinModelRegistry, FileModelSource, FilesystemModelCatalog, InstallMode,
-    InstallResult, ModelCatalog, ModelFetchRequest, ModelFormat, ModelId, ModelInstaller,
-    ModelLocation, ModelPackage, ModelReference, ModelSourceReference, ModelSpec,
-    RegisteredModelInstaller,
+    default_model_root, FileModelSource, FilesystemModelCatalog, InstallMode, InstallResult,
+    ModelCatalog, ModelFetchRequest, ModelFormat, ModelId, ModelInstaller, ModelLocation,
+    ModelPackage, ModelReference, ModelSourceReference, ModelSpec,
 };
 use ml_runtime::{
     DecisionQuestion, DecisionRequest, DecisionType, Runtime, RuntimeCapabilities, VERSION,
@@ -89,6 +88,12 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum RegistryModelCommands {
+    List {
+        #[arg(long)]
+        models: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Install {
         model: String,
         /// Override the configured HTTPS source or use a local package directory.
@@ -98,6 +103,20 @@ enum RegistryModelCommands {
         models: Option<String>,
         #[arg(long)]
         replace: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        model: String,
+        #[arg(long)]
+        models: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Doctor {
+        model: String,
+        #[arg(long)]
+        models: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -208,6 +227,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Model {
+            command: RegistryModelCommands::List { models, json },
+        } => {
+            let root = models
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(default_model_root)?;
+            let runtime = Runtime::builder().model_root(root).build();
+            let models = runtime.installed_models()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&models)?);
+            } else {
+                println!("MODEL\tVERSION\tBACKEND\tPLATFORM\tSTATUS\tCOMPILED");
+                for model in models {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        model.model,
+                        model.revision,
+                        model.backend,
+                        model.platform,
+                        model.status,
+                        if model.compiled { "yes" } else { "no" }
+                    );
+                }
+            }
+        }
+        Commands::Model {
             command:
                 RegistryModelCommands::Install {
                     model,
@@ -217,7 +262,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json,
                 },
         } => {
-            let registered = BuiltinModelRegistry.resolve(&model)?;
             let root = models
                 .map(std::path::PathBuf::from)
                 .map(Ok)
@@ -227,42 +271,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .then(|| std::env::var("ML_RUNTIME_LAYA_SOURCE").ok())
                     .flatten()
             });
-            let result = RegisteredModelInstaller::new(&root)?
-                .install(
-                    &registered,
-                    source.as_deref(),
-                    if replace {
-                        InstallMode::Replace
-                    } else {
-                        InstallMode::KeepExisting
-                    },
-                    None,
-                )
+            let runtime = Runtime::builder()
+                .model_root(root)
+                .register_decision_provider(CoreMlBackend)
+                .build();
+            let result = runtime
+                .install_registered_model(&model, source.as_deref(), replace)
                 .await?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "model": registered.name,
-                        "revision": registered.revision,
-                        "backend": registered.backend,
-                        "package_path": result.package_path,
-                        "status": if result.already_installed { "already_installed" } else { "installed" },
+                        "model": result.model.model,
+                        "revision": result.model.revision,
+                        "backend": result.model.backend,
+                        "package_path": result.model.package_path,
+                        "status": result.model.status,
+                        "compiled": result.model.compiled,
+                        "already_installed": result.already_installed,
+                        "duration_ms": result.duration_ms,
                     }))?
                 );
             } else {
                 println!(
-                    "model: {}\nrevision: {}\nbackend: {}\nstatus: {}\ninstalled_path: {}",
-                    registered.name,
-                    registered.revision,
-                    registered.backend,
-                    if result.already_installed {
-                        "already_installed"
-                    } else {
-                        "installed"
-                    },
-                    result.package_path.display()
+                    "model: {}\nrevision: {}\nbackend: {}\nstatus: ready\ncompiled: yes\nalready_installed: {}\ninstallation_ms: {}\ninstalled_path: {}",
+                    result.model.model,
+                    result.model.revision,
+                    result.model.backend,
+                    result.already_installed,
+                    result.duration_ms,
+                    result.model.package_path.display()
                 );
+            }
+        }
+        Commands::Model {
+            command:
+                RegistryModelCommands::Remove {
+                    model,
+                    models,
+                    json,
+                },
+        } => {
+            let root = models
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(default_model_root)?;
+            let runtime = Runtime::builder().model_root(root).build();
+            let removed = runtime.remove_registered_model(&model)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&removed)?);
+            } else {
+                println!("model: {}\nstatus: removed", removed.model);
+            }
+        }
+        Commands::Model {
+            command:
+                RegistryModelCommands::Doctor {
+                    model,
+                    models,
+                    json,
+                },
+        } => {
+            let root = models
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(default_model_root)?;
+            let runtime = Runtime::builder()
+                .model_root(root)
+                .register_decision_provider(CoreMlBackend)
+                .build();
+            let report = runtime.doctor_registered_model(&model)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "model: {}\nrevision: {}\nbackend: {}\nstatus: {}",
+                    report.model.model,
+                    report.model.revision,
+                    report.model.backend,
+                    report.model.status
+                );
+                for diagnostic in &report.diagnostics {
+                    println!(
+                        "{}: {} - {}",
+                        if diagnostic.ok { "ok" } else { "error" },
+                        diagnostic.check,
+                        diagnostic.message
+                    );
+                }
+            }
+            if report.model.status != ml_runtime::InstalledModelStatus::Ready {
+                return Err(format!("model {} is not ready", report.model.model).into());
             }
         }
         Commands::Laya {

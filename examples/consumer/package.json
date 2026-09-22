@@ -1,0 +1,13 @@
+{
+  "name": "rust-ml-runtime-consumer-example",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.cjs",
+    "healthcare": "node healthcare.cjs",
+    "measure": "node measure.cjs"
+  },
+  "dependencies": {
+    "@rust-ml-runtime/node": "0.1.0"
+  }
+}

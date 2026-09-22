@@ -1,0 +1,11 @@
+{
+  "name": "@rust-ml-runtime/node-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Linux x64 native binary for @rust-ml-runtime/node",
+  "main": "ml_runtime_node.node",
+  "files": ["ml_runtime_node.node"],
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "license": "MIT"
+}

@@ -82,8 +82,13 @@ publishes the versioned package. On macOS the default root is
 
 Laya is the first entry. Its installed layout keeps `model.mlpackage`,
 `coreml_config.json`, `rl_agent_config.json`, and tokenizer files together.
-Core ML compilation produces recreatable runtime state; the compiled output is
-not authoritative and does not affect Laya's logical identity.
+`ml-runtime model install laya` completes the entire lifecycle: native download,
+checksum verification, atomic artifact publication, Core ML compilation,
+compiled schema validation, and an atomic `installation.json` readiness
+manifest. Core ML compilation produces recreatable runtime state; the compiled
+output is not authoritative and does not affect Laya's logical identity.
+Normal inference requires a READY manifest and never recompiles a missing or
+corrupt artifact. Use `ml-runtime model doctor laya` for actionable diagnostics.
 
 The CLI supports local package acquisition with:
 

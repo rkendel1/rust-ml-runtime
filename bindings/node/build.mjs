@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const workspace = path.resolve(directory, '../..');
-const built = spawnSync('cargo', ['build', '-p', 'ml-runtime-node'], {
+const target = process.env.ML_RUNTIME_NODE_TARGET;
+const cargoArguments = ['build', '--release', '-p', 'ml-runtime-node'];
+if (target) cargoArguments.push('--target', target);
+const built = spawnSync('cargo', cargoArguments, {
   cwd: workspace,
   stdio: 'inherit',
 });
@@ -16,7 +19,8 @@ const library = process.platform === 'darwin'
   : process.platform === 'win32'
     ? 'ml_runtime_node.dll'
     : 'libml_runtime_node.so';
-const output = path.join(directory, 'native', 'ml_runtime_node.node');
+const platform = `${process.platform}-${process.arch}`;
+const output = path.join(directory, 'native', platform, 'ml_runtime_node.node');
 await mkdir(path.dirname(output), { recursive: true });
-await copyFile(path.join(workspace, 'target', 'debug', library), output);
+await copyFile(path.join(workspace, 'target', ...(target ? [target] : []), 'release', library), output);
 console.log(output);

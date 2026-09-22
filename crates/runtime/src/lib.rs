@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     hash::{Hash, Hasher},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
@@ -50,12 +50,69 @@ pub use ml_runtime_inference::{
 };
 pub use ml_runtime_model;
 pub use ml_runtime_model::{
-    default_model_root, BuiltinModelRegistry, FilesystemModelCatalog, ModelDescriptor, ModelFormat,
-    ModelId, ModelLocation, ModelReference, ModelSpec, RegisteredModelInstaller,
+    default_model_root, BuiltinModelRegistry, CompiledArtifactManifest, CompiledStatus,
+    FilesystemModelCatalog, InstallationManifest, ModelDescriptor, ModelFormat, ModelId,
+    ModelLocation, ModelReference, ModelSpec, RegisteredModelInstaller,
 };
 pub use ml_runtime_provider;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstalledModelStatus {
+    NotInstalled,
+    InstalledNotCompiled,
+    Ready,
+    Corrupt,
+    Incompatible,
+    Unsupported,
+}
+
+impl std::fmt::Display for InstalledModelStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotInstalled => "not_installed",
+            Self::InstalledNotCompiled => "installed_not_compiled",
+            Self::Ready => "ready",
+            Self::Corrupt => "corrupt",
+            Self::Incompatible => "incompatible",
+            Self::Unsupported => "unsupported",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstalledModelRecord {
+    pub model: String,
+    pub revision: String,
+    pub backend: String,
+    pub platform: String,
+    pub status: InstalledModelStatus,
+    pub compiled: bool,
+    pub package_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDiagnostic {
+    pub check: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDoctorReport {
+    pub model: InstalledModelRecord,
+    pub diagnostics: Vec<ModelDiagnostic>,
+    pub manifest: Option<InstallationManifest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelLifecycleResult {
+    pub model: InstalledModelRecord,
+    pub already_installed: bool,
+    pub duration_ms: u128,
+}
 
 /// Bounded asynchronous stream of normalized runtime-owned inference events.
 pub type InferenceStream = BoxStream<RuntimeResult<InferenceStreamEvent>>;
@@ -745,6 +802,336 @@ impl Runtime {
         }
     }
 
+    fn registered_model_root(&self) -> RuntimeResult<&Path> {
+        self.model_root
+            .as_deref()
+            .ok_or_else(|| RuntimeError::ModelUnavailable {
+                model: "registered models".to_owned(),
+                provider: "local".to_owned(),
+                reason: "model directory unavailable; set ML_RUNTIME_MODEL_DIR".to_owned(),
+            })
+    }
+
+    pub fn installed_models(&self) -> RuntimeResult<Vec<InstalledModelRecord>> {
+        let root = self.registered_model_root()?;
+        let installer = RegisteredModelInstaller::new(root)
+            .map_err(|error| RuntimeError::execution("model list", error.to_string()))?;
+        Ok(BuiltinModelRegistry
+            .list()
+            .into_iter()
+            .map(|model| {
+                let package = installer.installed_path(&model);
+                let (status, compiled) = if !package.exists() {
+                    (InstalledModelStatus::NotInstalled, false)
+                } else if model.backend == "coreml" && !cfg!(target_os = "macos") {
+                    (InstalledModelStatus::Unsupported, false)
+                } else {
+                    match InstallationManifest::read(&package) {
+                        Ok(manifest)
+                            if manifest.model == model.name
+                                && manifest.model_revision == model.revision
+                                && manifest.runtime_requirement == model.runtime_requirement
+                                && ml_runtime_model::runtime_requirement_satisfied(
+                                    &manifest.runtime_requirement,
+                                    VERSION,
+                                )
+                                && manifest.os == std::env::consts::OS
+                                && manifest.architecture == std::env::consts::ARCH
+                                && manifest.compiled_status == CompiledStatus::Ready
+                                && manifest
+                                    .compiled_artifact
+                                    .as_ref()
+                                    .is_some_and(|artifact| artifact.path.is_dir()) =>
+                        {
+                            (InstalledModelStatus::Ready, true)
+                        }
+                        Ok(manifest) if manifest.compiled_status != CompiledStatus::Ready => {
+                            (InstalledModelStatus::InstalledNotCompiled, false)
+                        }
+                        Ok(_) => (InstalledModelStatus::Incompatible, false),
+                        Err(_) => (InstalledModelStatus::Corrupt, false),
+                    }
+                };
+                InstalledModelRecord {
+                    model: model.name,
+                    revision: model.revision,
+                    backend: model.backend,
+                    platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    status,
+                    compiled,
+                    package_path: package,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn install_registered_model(
+        &self,
+        name: &str,
+        source_override: Option<&str>,
+        replace: bool,
+    ) -> RuntimeResult<ModelLifecycleResult> {
+        let started = Instant::now();
+        let model =
+            BuiltinModelRegistry
+                .resolve(name)
+                .map_err(|error| RuntimeError::ModelNotFound {
+                    model: error.to_string(),
+                })?;
+        if model.backend == "coreml" && !cfg!(target_os = "macos") {
+            return Err(RuntimeError::backend_unavailable(
+                "coreml",
+                "Laya installation requires macOS; Core ML is unavailable on this platform",
+            ));
+        }
+        let root = self.registered_model_root()?;
+        let installer = RegisteredModelInstaller::new(root)
+            .map_err(|error| RuntimeError::execution("model install", error.to_string()))?;
+        let installed = installer
+            .install(
+                &model,
+                source_override,
+                if replace {
+                    ml_runtime_model::InstallMode::Replace
+                } else {
+                    ml_runtime_model::InstallMode::KeepExisting
+                },
+                None,
+            )
+            .await
+            .map_err(|error| RuntimeError::execution("model install", error.to_string()))?;
+
+        #[cfg(feature = "coreml")]
+        let prepared = if model.backend == "coreml" {
+            if installed.already_installed && !replace {
+                ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(
+                    &installed.package_path,
+                )
+                .or_else(|_| {
+                    ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(&installed.package_path)
+                })?
+            } else {
+                ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(&installed.package_path)?
+            }
+        } else {
+            return Err(RuntimeError::UnsupportedModel {
+                model: model.name.clone(),
+                backend: model.backend.clone(),
+                reason: "registered backend has no preparation lifecycle".to_owned(),
+            });
+        };
+        #[cfg(not(feature = "coreml"))]
+        return Err(RuntimeError::backend_unavailable(
+            "coreml",
+            "this runtime was built without Core ML support",
+        ));
+
+        #[cfg(feature = "coreml")]
+        {
+            let manifest = InstallationManifest {
+                schema_version: 1,
+                model: model.name.clone(),
+                model_revision: model.revision.clone(),
+                model_checksum: prepared.model_identity,
+                runtime_version: VERSION.to_owned(),
+                runtime_requirement: model.runtime_requirement.clone(),
+                backend: model.backend.clone(),
+                os: std::env::consts::OS.to_owned(),
+                architecture: std::env::consts::ARCH.to_owned(),
+                installed_at_unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                compiled_status: CompiledStatus::Ready,
+                compiled_artifact: Some(CompiledArtifactManifest {
+                    path: prepared.path,
+                    identity: prepared.compiled_identity,
+                }),
+            };
+            manifest
+                .write_atomic(&installed.package_path)
+                .map_err(|error| RuntimeError::execution("model install", error.to_string()))?;
+            Ok(ModelLifecycleResult {
+                model: InstalledModelRecord {
+                    model: model.name,
+                    revision: model.revision,
+                    backend: model.backend,
+                    platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    status: InstalledModelStatus::Ready,
+                    compiled: true,
+                    package_path: installed.package_path,
+                },
+                already_installed: installed.already_installed,
+                duration_ms: started.elapsed().as_millis(),
+            })
+        }
+    }
+
+    pub fn doctor_registered_model(&self, name: &str) -> RuntimeResult<ModelDoctorReport> {
+        let model =
+            BuiltinModelRegistry
+                .resolve(name)
+                .map_err(|error| RuntimeError::ModelNotFound {
+                    model: error.to_string(),
+                })?;
+        let root = self.registered_model_root()?;
+        let installer = RegisteredModelInstaller::new(root)
+            .map_err(|error| RuntimeError::execution("model doctor", error.to_string()))?;
+        let package = installer.installed_path(&model);
+        let mut diagnostics = Vec::new();
+        if !package.is_dir() {
+            diagnostics.push(ModelDiagnostic {
+                check: "installation".to_owned(),
+                ok: false,
+                message: format!(
+                    "model is not installed; run `ml-runtime model install {}`",
+                    model.name
+                ),
+            });
+            return Ok(ModelDoctorReport {
+                model: InstalledModelRecord {
+                    model: model.name,
+                    revision: model.revision,
+                    backend: model.backend,
+                    platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    status: InstalledModelStatus::NotInstalled,
+                    compiled: false,
+                    package_path: package,
+                },
+                diagnostics,
+                manifest: None,
+            });
+        }
+        let artifact_valid = match installer.validate(&model, &package) {
+            Ok(()) => {
+                diagnostics.push(ModelDiagnostic {
+                    check: "artifact".to_owned(),
+                    ok: true,
+                    message: "registered files, tokenizer, Core ML package, and SHA-256 checksums are valid".to_owned(),
+                });
+                true
+            }
+            Err(error) => {
+                diagnostics.push(ModelDiagnostic {
+                    check: "artifact".to_owned(),
+                    ok: false,
+                    message: format!(
+                        "{error}; reinstall with `ml-runtime model install {} --replace`",
+                        model.name
+                    ),
+                });
+                false
+            }
+        };
+        let manifest = InstallationManifest::read(&package).ok();
+        let compatible = manifest.as_ref().is_some_and(|manifest| {
+            manifest.schema_version == 1
+                && manifest.model == model.name
+                && manifest.model_revision == model.revision
+                && manifest.backend == model.backend
+                && ml_runtime_model::runtime_requirement_satisfied(
+                    &manifest.runtime_requirement,
+                    VERSION,
+                )
+                && manifest.os == std::env::consts::OS
+                && manifest.architecture == std::env::consts::ARCH
+        });
+        diagnostics.push(ModelDiagnostic {
+            check: "metadata".to_owned(),
+            ok: compatible,
+            message: if compatible {
+                "installation metadata and runtime/backend compatibility are valid".to_owned()
+            } else {
+                format!(
+                    "installation metadata is missing or incompatible; run `ml-runtime model install {} --replace`",
+                    model.name
+                )
+            },
+        });
+        let supported = model.backend != "coreml" || cfg!(target_os = "macos");
+        diagnostics.push(ModelDiagnostic {
+            check: "platform".to_owned(),
+            ok: supported,
+            message: if supported {
+                format!("{} is supported on this platform", model.backend)
+            } else {
+                "Core ML is only supported on macOS".to_owned()
+            },
+        });
+        #[cfg(feature = "coreml")]
+        let compiled_valid = supported
+            && compatible
+            && ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(&package).is_ok();
+        #[cfg(not(feature = "coreml"))]
+        let compiled_valid = false;
+        diagnostics.push(ModelDiagnostic {
+            check: "compiled_artifact".to_owned(),
+            ok: compiled_valid,
+            message: if compiled_valid {
+                "compiled Core ML artifact identity and schema are valid".to_owned()
+            } else {
+                format!(
+                    "compiled artifact is missing or invalid; run `ml-runtime model install {} --replace`",
+                    model.name
+                )
+            },
+        });
+        let status = if !supported {
+            InstalledModelStatus::Unsupported
+        } else if !artifact_valid {
+            InstalledModelStatus::Corrupt
+        } else if !compatible {
+            InstalledModelStatus::Incompatible
+        } else if !compiled_valid {
+            InstalledModelStatus::InstalledNotCompiled
+        } else {
+            InstalledModelStatus::Ready
+        };
+        Ok(ModelDoctorReport {
+            model: InstalledModelRecord {
+                model: model.name,
+                revision: model.revision,
+                backend: model.backend,
+                platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                compiled: compiled_valid,
+                package_path: package,
+                status,
+            },
+            diagnostics,
+            manifest,
+        })
+    }
+
+    pub fn remove_registered_model(&self, name: &str) -> RuntimeResult<InstalledModelRecord> {
+        let model =
+            BuiltinModelRegistry
+                .resolve(name)
+                .map_err(|error| RuntimeError::ModelNotFound {
+                    model: error.to_string(),
+                })?;
+        let root = self.registered_model_root()?;
+        let installer = RegisteredModelInstaller::new(root)
+            .map_err(|error| RuntimeError::execution("model remove", error.to_string()))?;
+        let package = installer.installed_path(&model);
+        if package.exists() {
+            #[cfg(feature = "coreml")]
+            if model.backend == "coreml" {
+                ml_runtime_coreml_backend::CoreMlBackend::remove_prepared_laya(&package)?;
+            }
+            std::fs::remove_dir_all(&package)
+                .map_err(|error| RuntimeError::execution("model remove", error.to_string()))?;
+        }
+        Ok(InstalledModelRecord {
+            model: model.name,
+            revision: model.revision,
+            backend: model.backend,
+            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            status: InstalledModelStatus::NotInstalled,
+            compiled: false,
+            package_path: package,
+        })
+    }
+
     /// Loads a validated installed model by its registry name. Source, artifact
     /// layout, tokenizer, and backend selection remain runtime concerns.
     pub fn load_model(&self, name: &str) -> RuntimeResult<Box<dyn DecisionModel>> {
@@ -771,12 +1158,35 @@ impl Runtime {
                 model: format!("{name}; install it with `ml-runtime model install {name}`"),
             });
         }
-        installer.validate(&registered, &package).map_err(|error| {
-            RuntimeError::ModelIntegrity {
+        let manifest =
+            InstallationManifest::read(&package).map_err(|error| RuntimeError::ModelIntegrity {
                 model: name.to_owned(),
-                reason: error.to_string(),
-            }
-        })?;
+                reason: format!("{error}; run `ml-runtime model doctor {name}`"),
+            })?;
+        let compatible = manifest.schema_version == 1
+            && manifest.model == registered.name
+            && manifest.model_revision == registered.revision
+            && manifest.backend == registered.backend
+            && ml_runtime_model::runtime_requirement_satisfied(
+                &manifest.runtime_requirement,
+                VERSION,
+            )
+            && manifest.os == std::env::consts::OS
+            && manifest.architecture == std::env::consts::ARCH
+            && manifest.compiled_status == CompiledStatus::Ready
+            && manifest
+                .compiled_artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.path.is_dir());
+        if !compatible {
+            return Err(RuntimeError::ModelUnavailable {
+                model: name.to_owned(),
+                provider: "local".to_owned(),
+                reason: format!(
+                    "installation is incomplete, incompatible, or not compiled; run `ml-runtime model doctor {name}`"
+                ),
+            });
+        }
         self.load_decision_model(package)
     }
 

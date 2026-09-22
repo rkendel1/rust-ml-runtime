@@ -436,6 +436,29 @@ impl CoreMlBackend {
     pub fn descriptor() -> BackendCapability {
         BackendCapability::from_parts("coreml", Self.capabilities())
     }
+
+    /// Compiles and validates the registered Laya artifact in the runtime-owned cache.
+    pub fn prepare_laya(package: &std::path::Path) -> RuntimeResult<PreparedCoreMlArtifact> {
+        laya::prepare(package)
+    }
+
+    /// Validates an already-prepared Laya installation without compiling it.
+    pub fn validate_prepared_laya(
+        package: &std::path::Path,
+    ) -> RuntimeResult<PreparedCoreMlArtifact> {
+        laya::validate_prepared(package)
+    }
+
+    pub fn remove_prepared_laya(package: &std::path::Path) -> RuntimeResult<()> {
+        laya::remove_prepared(package)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedCoreMlArtifact {
+    pub path: std::path::PathBuf,
+    pub model_identity: String,
+    pub compiled_identity: String,
 }
 
 impl ml_runtime_backend::DecisionModelProvider for CoreMlBackend {
