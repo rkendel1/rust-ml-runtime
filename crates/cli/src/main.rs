@@ -47,10 +47,6 @@ enum Commands {
     Providers {
         #[command(subcommand)]
         command: Option<ProviderCommands>,
-        #[arg(long, default_value = "providers")]
-        providers: String,
-        #[arg(long)]
-        json: bool,
     },
     Backends,
     Capabilities {
@@ -88,8 +84,17 @@ enum CapabilityCommands {
 
 #[derive(Subcommand)]
 enum ProviderCommands {
-    List,
-    Inspect { path: String },
+    List {
+        #[arg(long, default_value = "providers")]
+        providers: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -324,38 +329,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Streaming: {}", metrics.streaming_requests);
             }
         }
-        Commands::Providers {
-            command,
-            providers,
-            json,
-        } => {
-            let packages = ml_runtime::CapabilityRegistry::discover_local_packages(&providers)?;
-            if let Some(ProviderCommands::Inspect { path }) = command {
-                let package = ml_runtime::LocalProviderPackage::load(path)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&package)?);
-                } else {
-                    println!(
-                        "{}\tversion={}\tpackage={}",
-                        package.manifest.provider.id,
-                        package.manifest.provider.version,
-                        package.manifest.package.id
-                    );
-                    println!("Runtime: {}", package.manifest.package.runtime);
-                    println!("Capabilities:");
-                    for capability in package.manifest.capabilities {
-                        println!("  {}\tversion={}", capability.id, capability.version);
+        Commands::Providers { command } => {
+            let (providers, json) = match command {
+                Some(ProviderCommands::List { providers, json }) => (providers, json),
+                Some(ProviderCommands::Inspect { path, json }) => {
+                    let package = ml_runtime::LocalProviderPackage::load(path)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&package)?);
+                    } else {
+                        println!(
+                            "{}\tversion={}\tpackage={}",
+                            package.manifest.provider.id,
+                            package.manifest.provider.version,
+                            package.manifest.package.id
+                        );
+                        println!("Runtime: {}", package.manifest.package.runtime);
+                        println!("Capabilities:");
+                        for capability in package.manifest.capabilities {
+                            println!("  {}\tversion={}", capability.id, capability.version);
+                        }
+                        println!(
+                            "Binary: {}",
+                            package.binary.map_or_else(
+                                || "not loaded".to_owned(),
+                                |path| path.display().to_string()
+                            )
+                        );
                     }
-                    println!(
-                        "Binary: {}",
-                        package.binary.map_or_else(
-                            || "not loaded".to_owned(),
-                            |path| path.display().to_string()
-                        )
-                    );
+                    return Ok(());
                 }
-                return Ok(());
-            }
+                None => {
+                    let runtime = build_runtime(None, None, false, false, None);
+                    for provider in runtime.providers().list() {
+                        println!(
+                            "{}\tavailable={}\tremote={}\tlocal={}",
+                            provider.name, provider.available, provider.remote, provider.local
+                        );
+                    }
+                    return Ok(());
+                }
+            };
+            let packages = ml_runtime::CapabilityRegistry::discover_local_packages(&providers)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&packages)?);
             } else if packages.is_empty() {

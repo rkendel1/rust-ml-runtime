@@ -297,7 +297,7 @@ impl ManifestCapabilityProvider {
                 description: format!("Provided by {}", manifest.provider.id),
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
-                requirements: capability.configuration.clone(),
+                requirements: Vec::new(),
                 execution_targets: if capability.execution_targets.is_empty() {
                     manifest.provider.execution_targets.clone()
                 } else {
@@ -318,7 +318,12 @@ impl ManifestCapabilityProvider {
                     .unwrap_or_else(|| "external".to_owned()),
                 local: true,
                 remote: false,
-                resource_requirements: capability.dependencies.clone(),
+                resource_requirements: capability
+                    .configuration
+                    .iter()
+                    .chain(capability.dependencies.iter())
+                    .cloned()
+                    .collect(),
             })
             .collect();
         Self {
@@ -348,8 +353,8 @@ impl CapabilityProvider for ManifestCapabilityProvider {
 
     fn availability(&self) -> CapabilityAvailability {
         CapabilityAvailability {
-            state: AvailabilityState::Registered,
-            reason: "manifest validated; provider execution is explicit".to_owned(),
+            state: AvailabilityState::Available,
+            reason: "manifest validated; provider execution remains explicit".to_owned(),
         }
     }
 
@@ -1115,7 +1120,7 @@ version = "1"
         assert_eq!(registry.get("example.run").unwrap().backend, "cpu");
         assert_eq!(
             registry.provider("example").unwrap().availability().state,
-            AvailabilityState::Registered
+            AvailabilityState::Available
         );
         let _ = std::fs::remove_dir_all(root);
     }
