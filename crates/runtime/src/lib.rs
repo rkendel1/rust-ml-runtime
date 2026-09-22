@@ -921,6 +921,8 @@ impl Runtime {
             });
         };
         #[cfg(not(feature = "coreml"))]
+        let _ = (&started, &installed);
+        #[cfg(not(feature = "coreml"))]
         return Err(RuntimeError::backend_unavailable(
             "coreml",
             "this runtime was built without Core ML support",

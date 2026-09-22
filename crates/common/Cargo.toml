@@ -3,6 +3,10 @@ name = "ml-runtime-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared errors, cancellation, and stream types for rust-ml-runtime"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ml-runtime-common"
 
 [dependencies]
 futures-core.workspace = true

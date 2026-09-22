@@ -5,10 +5,22 @@ and Windows x64. The same matrix builds one npm native package per platform;
 the platform-neutral `@rust-ml-runtime/node` package selects one through npm
 optional dependencies.
 
+The release also packages `rust-ml-runtime` and its required implementation
+crates for crates.io. Rust applications install only the public crate:
+
+```toml
+[dependencies]
+rust-ml-runtime = "0.1"
+```
+
+CLI, Node, benchmark, server-integration, and placeholder backend workspace
+members remain private.
+
 Every archive has a `.sha256` sidecar. `release-manifest.json` records the
 artifact name, independently versioned runtime/package version, product,
 platform, architecture, and SHA-256. Publication is gated on formatting,
-Clippy warnings, workspace tests, native artifact smoke tests, checksum
+Clippy warnings, workspace tests, Cargo package audits, crates.io dry-runs, a
+clean packaged external Rust consumer, native artifact smoke tests, checksum
 verification, a clean npm consumer, and the real macOS Laya lifecycle. The
 Laya gate installs and diagnoses the model, runs inference offline twice, and
 asserts that inference did not mutate the compiled Core ML artifact.
@@ -38,8 +50,19 @@ valid only when its runtime requirement and artifact identities match.
 
 ## Publishing
 
-The release job publishes native npm packages before the public wrapper, then
-uploads archives, npm tarballs, checksum sidecars, `SHA256SUMS`, and the JSON
-manifest to GitHub Releases. `NPM_TOKEN` must have publish access to the
-`@rust-ml-runtime` scope. A missing token fails the release rather than
-silently producing a partial developer product.
+The release job runs `npm run publish:packages`, which publishes the required
+Rust support crates followed by `rust-ml-runtime`, then native npm packages
+followed by the public wrapper. GitHub release artifacts are uploaded only
+after registry publication succeeds. `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN`
+must have the corresponding publish access. Registry preflight rejects any
+existing immutable version before the first publication attempt.
+
+For an authorized local release, export `CARGO_REGISTRY_TOKEN` and
+`NODE_AUTH_TOKEN`, collect the release artifacts under `artifacts/`, and run:
+
+```sh
+npm run publish:packages
+```
+
+The version defaults to the root `package.json`; `--version X.Y.Z` and
+`--artifacts PATH` override the defaults.

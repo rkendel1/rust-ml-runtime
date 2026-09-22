@@ -3,6 +3,7 @@ name = "ml-runtime-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "ml-runtime"
@@ -10,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-ml-runtime = { path = "../runtime", features = ["coreml"] }
+ml-runtime = { package = "rust-ml-runtime", path = "../runtime", features = ["coreml"] }
 ml-runtime-coreml-backend = { path = "../../backends/coreml" }
 ml-runtime-cpu-backend = { path = "../../backends/cpu" }
 ml-runtime-cuda-backend = { path = "../../backends/cuda" }

@@ -1,0 +1,8 @@
+{
+  "name": "rust-ml-runtime-release",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "publish:packages": "node tools/publish-packages.mjs"
+  }
+}

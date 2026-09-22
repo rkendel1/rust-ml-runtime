@@ -25,6 +25,8 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 version = "0.1.0"
+repository = "https://github.com/rkendel1/rust-ml-runtime"
+homepage = "https://github.com/rkendel1/rust-ml-runtime"
 
 [workspace.dependencies]
 async-trait = "0.1"

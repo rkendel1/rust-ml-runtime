@@ -3,13 +3,17 @@ name = "ml-runtime-http-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "HTTP inference provider for rust-ml-runtime"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ml-runtime-http-provider"
 
 [dependencies]
 async-trait.workspace = true
-ml-runtime-common = { path = "../../crates/common" }
-ml-runtime-inference = { path = "../../crates/inference" }
-ml-runtime-provider = { path = "../../crates/provider" }
-ml-runtime-protocol = { path = "../../crates/protocol" }
+ml-runtime-common = { version = "0.1.0", path = "../../crates/common" }
+ml-runtime-inference = { version = "0.1.0", path = "../../crates/inference" }
+ml-runtime-provider = { version = "0.1.0", path = "../../crates/provider" }
+ml-runtime-protocol = { version = "0.1.0", path = "../../crates/protocol" }
 reqwest.workspace = true
 futures-util.workspace = true
 tokio.workspace = true

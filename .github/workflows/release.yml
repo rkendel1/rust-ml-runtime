@@ -31,8 +31,31 @@ jobs:
       - run: npm pack --dry-run
         working-directory: bindings/node
 
-  package:
+  cargo-package:
     needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package crates.io artifacts and run publish dry-runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION##*/}"
+          bash tools/package-crates.sh "${version#v}"
+      - name: Verify clean external Rust consumer without Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION##*/}"
+          node tools/verify-rust-package.mjs "${version#v}" target/package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cargo-packages
+          path: target/package/*.crate
+
+  package:
+    needs: [quality, cargo-package]
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -147,7 +170,7 @@ jobs:
 
   verify-laya-release:
     needs: [package, metadata]
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -203,27 +226,25 @@ jobs:
           path: release-measurements.json
 
   publish:
-    needs: [package, metadata, verify-laya-release]
+    needs: [cargo-package, package, metadata, verify-laya-release]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
-      - name: Publish npm packages
+      - name: Publish crates.io and npm packages
         shell: bash
         run: |
           set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN"
           test -n "$NODE_AUTH_TOKEN"
           npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
-          find artifacts -name 'rust-ml-runtime-node-*-*-*.tgz' -type f -print0 | sort -z | while IFS= read -r -d '' package; do
-            npm publish --access public "$package"
-          done
-          root="$(find artifacts -name 'rust-ml-runtime-node-[0-9]*.tgz' -type f -print -quit)"
-          test -n "$root"
-          npm publish --access public "$root"
+          npm run publish:packages -- --version "${GITHUB_REF_NAME#v}" --artifacts artifacts
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
@@ -273,7 +294,7 @@ jobs:
 
   verify-public-product:
     needs: [publish, verify-public-cli]
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
     steps:

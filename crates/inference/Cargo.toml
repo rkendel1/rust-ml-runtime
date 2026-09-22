@@ -3,9 +3,13 @@ name = "ml-runtime-inference"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Typed inference requests, results, and provenance for rust-ml-runtime"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ml-runtime-inference"
 
 [dependencies]
 bytes.workspace = true
-ml-runtime-model = { path = "../model" }
+ml-runtime-model = { version = "0.1.0", path = "../model" }
 serde.workspace = true
 serde_json.workspace = true

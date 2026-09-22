@@ -1,6 +1,6 @@
 # Public developer API
 
-`ml-runtime` is the supported application-facing Rust crate. Its core API is
+`rust-ml-runtime` is the supported application-facing Rust crate. Its core API is
 the explicit, application-owned `Runtime`, plus model references, inference
 requests/results, execution policies, and structured errors re-exported at the
 crate root. The workspace is currently `0.1.x`; these APIs are supported but
@@ -9,12 +9,12 @@ still pre-1.0 and follow Cargo semantic-versioning conventions.
 ## Quickstart
 
 ```rust
-use ml_runtime::{
+use rust_ml_runtime::{
     FilesystemModelCatalog, InferenceRequest, Input, ModelReference, Runtime,
     Tensor,
 };
 
-# async fn example(values: Vec<f32>) -> ml_runtime::RuntimeResult<()> {
+# async fn example(values: Vec<f32>) -> rust_ml_runtime::RuntimeResult<()> {
 let runtime = Runtime::builder()
     .catalog(FilesystemModelCatalog::new("examples/models"))
     .build();

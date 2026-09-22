@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "macos", feature = "coreml"))]
 
-use ml_runtime::{DecisionQuestion, DecisionRequest, DecisionType, Runtime};
+use rust_ml_runtime::{DecisionQuestion, DecisionRequest, DecisionType, Runtime};
 use serde_json::Value;
 use std::path::PathBuf;
 
