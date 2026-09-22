@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::default_constructed_unit_structs))]
+
 use futures_util::StreamExt;
 use ml_runtime_backend::{Backend, BackendCapability};
 use ml_runtime_common::BoxStream;
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     hash::{Hash, Hasher},
+    path::Path,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
@@ -35,17 +38,20 @@ pub use capability::{
 };
 
 pub use ml_runtime_backend;
+pub use ml_runtime_backend::{DecisionModel, DecisionModelProvider};
 pub use ml_runtime_common;
 pub use ml_runtime_common::{CancellationToken, RuntimeError, RuntimeResult};
 pub use ml_runtime_inference;
 pub use ml_runtime_inference::{
-    ExecutionMetadata, ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceResult,
-    InferenceStreamEvent, Input, Output, Tensor,
+    DecisionExecution, DecisionOption, DecisionProvenance, DecisionQuestion, DecisionRequest,
+    DecisionResult, DecisionType, DecisionValue, ExecutionMetadata, ExecutionPolicy,
+    InferenceOptions, InferenceRequest, InferenceResult, InferenceStreamEvent, Input,
+    ModelDescription, ModelIdentity, Output, Tensor, TypedDecision,
 };
 pub use ml_runtime_model;
 pub use ml_runtime_model::{
-    FilesystemModelCatalog, ModelDescriptor, ModelFormat, ModelId, ModelLocation, ModelReference,
-    ModelSpec,
+    default_model_root, BuiltinModelRegistry, FilesystemModelCatalog, ModelDescriptor, ModelFormat,
+    ModelId, ModelLocation, ModelReference, ModelSpec, RegisteredModelInstaller,
 };
 pub use ml_runtime_provider;
 
@@ -476,8 +482,10 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    decision_providers: BTreeMap<String, Arc<dyn DecisionModelProvider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
     capability_registry: CapabilityRegistry,
+    model_root: Option<std::path::PathBuf>,
 }
 
 impl Default for RuntimeBuilder {
@@ -486,8 +494,10 @@ impl Default for RuntimeBuilder {
             config: RuntimeConfig::default(),
             backends: BTreeMap::new(),
             providers: BTreeMap::new(),
+            decision_providers: BTreeMap::new(),
             catalog: None,
             capability_registry: CapabilityRegistry::with_builtins(),
+            model_root: default_model_root().ok(),
         };
         builder
             .backends
@@ -495,6 +505,11 @@ impl Default for RuntimeBuilder {
         builder
             .backends
             .insert("onnx".to_owned(), Arc::new(OnnxBackend));
+        #[cfg(feature = "coreml")]
+        builder.decision_providers.insert(
+            "coreml".to_owned(),
+            Arc::new(ml_runtime_coreml_backend::CoreMlBackend),
+        );
         builder
     }
 }
@@ -523,6 +538,11 @@ impl RuntimeBuilder {
         C: ModelCatalog + 'static,
     {
         self.catalog = Some(Arc::new(catalog));
+        self
+    }
+
+    pub fn model_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.model_root = Some(root.into());
         self
     }
 
@@ -603,6 +623,15 @@ impl RuntimeBuilder {
         self
     }
 
+    pub fn register_decision_provider<P>(mut self, provider: P) -> Self
+    where
+        P: DecisionModelProvider + 'static,
+    {
+        self.decision_providers
+            .insert(provider.name().to_owned(), Arc::new(provider));
+        self
+    }
+
     pub fn register_capability_provider<P>(mut self, provider: P) -> Self
     where
         P: CapabilityProvider + 'static,
@@ -616,8 +645,10 @@ impl RuntimeBuilder {
             config: self.config.clone(),
             backends: self.backends,
             providers: self.providers,
+            decision_providers: self.decision_providers,
             catalog: self.catalog,
             capability_registry: self.capability_registry,
+            model_root: self.model_root,
             loaded_models: RwLock::new(HashMap::new()),
             inference_semaphore: Arc::new(Semaphore::new(
                 self.config.max_concurrent_inferences.max(1),
@@ -642,8 +673,10 @@ pub struct Runtime {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    decision_providers: BTreeMap<String, Arc<dyn DecisionModelProvider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
     capability_registry: CapabilityRegistry,
+    model_root: Option<std::path::PathBuf>,
     loaded_models: RwLock<HashMap<ModelCacheKey, LoadedModel>>,
     inference_semaphore: Arc<Semaphore>,
     load_semaphore: Arc<Semaphore>,
@@ -653,13 +686,98 @@ pub struct Runtime {
     execution_records: Mutex<VecDeque<ExecutionRecord>>,
 }
 
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Runtime {
+    pub fn new() -> Self {
+        Self::builder().build()
+    }
+
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::default()
     }
 
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    /// Loads an immutable local typed-decision artifact through the single matching backend.
+    /// There is no fallback: missing, ambiguous, or invalid artifacts fail closed.
+    pub fn load_decision_model(
+        &self,
+        artifact: impl AsRef<Path>,
+    ) -> RuntimeResult<Box<dyn DecisionModel>> {
+        let artifact = artifact.as_ref();
+        if !artifact.exists() {
+            return Err(RuntimeError::ModelNotFound {
+                model: artifact.display().to_string(),
+            });
+        }
+        if !artifact.is_dir() {
+            return Err(RuntimeError::ModelUnavailable {
+                model: artifact.display().to_string(),
+                provider: "local".to_owned(),
+                reason: "typed-decision artifact must be a directory".to_owned(),
+            });
+        }
+        let candidates: Vec<_> = self
+            .decision_providers
+            .values()
+            .filter(|provider| provider.supports_artifact(artifact))
+            .collect();
+        match candidates.as_slice() {
+            [] => Err(RuntimeError::UnsupportedModel {
+                model: artifact.display().to_string(),
+                backend: "none".to_owned(),
+                reason: "no registered typed-decision provider accepts this artifact".to_owned(),
+            }),
+            [provider] => provider.load_decision_model(artifact),
+            _ => Err(RuntimeError::CapabilityMismatch {
+                reason: format!(
+                    "multiple typed-decision providers accept {}",
+                    artifact.display()
+                ),
+            }),
+        }
+    }
+
+    /// Loads a validated installed model by its registry name. Source, artifact
+    /// layout, tokenizer, and backend selection remain runtime concerns.
+    pub fn load_model(&self, name: &str) -> RuntimeResult<Box<dyn DecisionModel>> {
+        let registered =
+            BuiltinModelRegistry
+                .resolve(name)
+                .map_err(|error| RuntimeError::ModelNotFound {
+                    model: error.to_string(),
+                })?;
+        let root = self
+            .model_root
+            .as_ref()
+            .ok_or_else(|| RuntimeError::ModelUnavailable {
+                model: name.to_owned(),
+                provider: "local".to_owned(),
+                reason: "model directory unavailable; set ML_RUNTIME_MODEL_DIR".to_owned(),
+            })?;
+        let installer = RegisteredModelInstaller::new(root).map_err(|error| {
+            RuntimeError::execution("installed model validation", error.to_string())
+        })?;
+        let package = installer.installed_path(&registered);
+        if !package.exists() {
+            return Err(RuntimeError::ModelNotFound {
+                model: format!("{name}; install it with `ml-runtime model install {name}`"),
+            });
+        }
+        installer.validate(&registered, &package).map_err(|error| {
+            RuntimeError::ModelIntegrity {
+                model: name.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        self.load_decision_model(package)
     }
 
     pub fn set_catalog<C>(&mut self, catalog: C)
@@ -1639,7 +1757,7 @@ impl Runtime {
         match reference {
             ModelReference::Id { id, version } => self.find_loaded(id, version.as_ref()),
             ModelReference::Spec(spec) => {
-                if let Some(existing) = self.find_loaded(&spec.id, spec.version.as_ref()).ok() {
+                if let Ok(existing) = self.find_loaded(&spec.id, spec.version.as_ref()) {
                     return Ok(existing);
                 }
                 self.load(spec.clone()).await?;
@@ -1655,9 +1773,7 @@ impl Runtime {
             .expect("loaded model registry poisoned");
         let found = cache.iter_mut().find(|(key, loaded)| {
             key.id == id
-                && version.map_or(true, |version| {
-                    loaded.spec.version.as_ref() == Some(version)
-                })
+                && version.is_none_or(|version| loaded.spec.version.as_ref() == Some(version))
         });
         if let Some((_, loaded)) = found {
             loaded.last_used = self.cache_clock.fetch_add(1, Ordering::Relaxed);
@@ -1679,7 +1795,7 @@ impl Runtime {
                 key.id == id
                     && version
                         .as_ref()
-                        .map_or(true, |v| key.version.as_ref() == Some(v))
+                        .is_none_or(|v| key.version.as_ref() == Some(v))
             })
     }
 
@@ -1982,6 +2098,7 @@ fn model_memory_bytes(model: &ModelSpec) -> u64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decorate_metadata(
     metadata: &mut ExecutionMetadata,
     output: &Output,
@@ -2013,6 +2130,7 @@ fn decorate_metadata(
     metadata.output_tokens = estimate_output_tokens(output);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn normalize_stream(
     mut source: BoxStream<RuntimeResult<InferenceChunk>>,
     request: InferenceRequest,

@@ -2,6 +2,7 @@ use bytes::Bytes;
 use ml_runtime_model::ModelReference;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 /// Determines where the runtime attempts to execute a request and whether it may fall back.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +205,111 @@ pub struct InferenceChunk {
 }
 
 pub type InferenceOutput = Output;
+
+/// A model-neutral request for one or more typed decisions about immutable input state.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionRequest {
+    pub state: Value,
+    pub decisions: Vec<DecisionQuestion>,
+}
+
+impl DecisionRequest {
+    pub fn new(state: impl Into<Value>, decisions: Vec<DecisionQuestion>) -> Self {
+        Self {
+            state: state.into(),
+            decisions,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionQuestion {
+    pub name: String,
+    pub instructions: String,
+    pub kind: DecisionType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecisionType {
+    Choice {
+        options: Vec<DecisionOption>,
+    },
+    Score {
+        levels: Vec<Value>,
+    },
+    /// Laya's binary yes/no decision head ("noul" in the model contract).
+    Noul {
+        #[serde(default)]
+        false_description: Option<Value>,
+        #[serde(default)]
+        true_description: Option<Value>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionResult {
+    pub model: ModelIdentity,
+    pub backend: String,
+    pub decisions: Vec<TypedDecision>,
+    pub execution: DecisionExecution,
+    pub provenance: DecisionProvenance,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelIdentity {
+    pub identifier: String,
+    pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TypedDecision {
+    pub name: String,
+    pub kind: String,
+    pub value: DecisionValue,
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+    pub action_probability: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum DecisionValue {
+    Choice(String),
+    Score(f64),
+    Noul(bool),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionExecution {
+    pub latency: Duration,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionProvenance {
+    pub artifact_path: PathBuf,
+    pub artifact_sha256: String,
+    pub runtime_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDescription {
+    pub identifier: String,
+    pub revision: Option<String>,
+    pub backend: String,
+    pub artifact_path: PathBuf,
+    pub artifact_sha256: String,
+    pub decision_types: Vec<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum InferenceStreamEvent {

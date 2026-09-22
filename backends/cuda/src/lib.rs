@@ -10,7 +10,7 @@ pub struct CudaBackend;
 
 impl CudaBackend {
     pub fn descriptor() -> BackendCapability {
-        BackendCapability::from_parts("cuda", Self::default().capabilities())
+        BackendCapability::from_parts("cuda", Self.capabilities())
     }
 }
 

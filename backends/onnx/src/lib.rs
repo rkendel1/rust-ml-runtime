@@ -19,7 +19,7 @@ struct OnnxLoadedModel {
 
 impl OnnxBackend {
     pub fn descriptor() -> BackendCapability {
-        BackendCapability::from_parts("onnx", Self::default().capabilities())
+        BackendCapability::from_parts("onnx", Self.capabilities())
     }
 
     fn load_session(model: &ModelSpec) -> RuntimeResult<Session> {
@@ -170,10 +170,10 @@ mod tests {
 
     #[test]
     fn advertises_onnx_format() {
-        let capabilities = OnnxBackend::default().capabilities();
+        let capabilities = OnnxBackend.capabilities();
         assert!(capabilities.available);
         assert_eq!(capabilities.supported_formats, vec![ModelFormat::Onnx]);
-        assert!(OnnxBackend::default().supports(&ModelSpec::new(
+        assert!(OnnxBackend.supports(&ModelSpec::new(
             "model",
             ModelFormat::Onnx,
             ModelLocation::Memory,

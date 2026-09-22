@@ -103,7 +103,7 @@ impl CapabilityPackageManifest {
                 reason: "at least one capability with an id and version is required".to_owned(),
             });
         }
-        if !runtime_requirement_satisfied(&self.package.runtime, crate::VERSION) {
+        if !Self::runtime_requirement_satisfied(&self.package.runtime, crate::VERSION) {
             return Err(RuntimeError::InvalidRequest {
                 reason: format!(
                     "provider requires runtime {}, current runtime is {}",
@@ -121,9 +121,10 @@ impl CapabilityPackageManifest {
             operation: "read provider manifest".to_owned(),
             reason: error.to_string(),
         })?;
-        let manifest = toml::from_str(&contents).map_err(|error| RuntimeError::InvalidRequest {
-            reason: format!("invalid provider manifest {}: {error}", path.display()),
-        })?;
+        let manifest: Self =
+            toml::from_str(&contents).map_err(|error| RuntimeError::InvalidRequest {
+                reason: format!("invalid provider manifest {}: {error}", path.display()),
+            })?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -132,7 +133,7 @@ impl CapabilityPackageManifest {
         let Some(required) = requirement.strip_prefix(">=") else {
             return requirement == current || requirement == "*" || requirement.is_empty();
         };
-        version_key(current) >= version_key(required)
+        Self::version_key(current) >= Self::version_key(required)
     }
 
     fn version_key(version: &str) -> (u64, u64, u64) {
@@ -782,15 +783,6 @@ fn path(request: &ExecutionRequest) -> RuntimeResult<PathBuf> {
             operation: "filesystem".to_owned(),
             reason: error.to_string(),
         })?;
-        if request
-            .limits
-            .max_output_bytes
-            .is_some_and(|limit| output.stdout.len() + output.stderr.len() > limit)
-        {
-            return Err(RuntimeError::ResourceLimit {
-                reason: "process output exceeds max_output_bytes".to_owned(),
-            });
-        }
         let root = std::fs::canonicalize(root).map_err(|error| RuntimeError::Execution {
             operation: "filesystem".to_owned(),
             reason: error.to_string(),
@@ -898,6 +890,15 @@ async fn process_spawn(request: &ExecutionRequest) -> RuntimeResult<Value> {
         operation: "process.spawn".to_owned(),
         reason: error.to_string(),
     })?;
+    if request
+        .limits
+        .max_output_bytes
+        .is_some_and(|limit| output.stdout.len() + output.stderr.len() > limit)
+    {
+        return Err(RuntimeError::ResourceLimit {
+            reason: "process output exceeds max_output_bytes".to_owned(),
+        });
+    }
     Ok(
         json!({"status": output.status.code(), "stdout": String::from_utf8_lossy(&output.stdout), "stderr": String::from_utf8_lossy(&output.stderr)}),
     )

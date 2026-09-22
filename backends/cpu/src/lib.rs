@@ -72,7 +72,7 @@ fn run_linear(
 
 impl CpuBackend {
     pub fn descriptor() -> BackendCapability {
-        BackendCapability::from_parts("cpu", Self::default().capabilities())
+        BackendCapability::from_parts("cpu", Self.capabilities())
     }
 }
 
@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn advertises_cpu_capabilities() {
-        let capabilities = CpuBackend::default().capabilities();
+        let capabilities = CpuBackend.capabilities();
         assert!(capabilities.available);
         assert!(capabilities.local);
         assert!(capabilities.streaming);
@@ -245,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn supports_round_trip_text_inference() {
-        let backend = CpuBackend::default();
+        let backend = CpuBackend;
         let spec = ModelSpec::new(
             "echo",
             ModelFormat::Unknown,
@@ -276,7 +276,7 @@ mod tests {
             r#"{"weights":[[2.0, 0.0],[0.0, 3.0]],"bias":[1.0,-1.0]}"#,
         )
         .unwrap();
-        let backend = CpuBackend::default();
+        let backend = CpuBackend;
         let spec = ModelSpec::new(
             "linear",
             ModelFormat::Unknown,

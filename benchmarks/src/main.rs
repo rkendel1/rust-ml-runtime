@@ -7,9 +7,7 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::builder()
-        .register_backend(CpuBackend::default())
-        .build();
+    let runtime = Runtime::builder().register_backend(CpuBackend).build();
     let model = ModelSpec::new(
         "benchmark-model",
         ModelFormat::Unknown,

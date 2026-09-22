@@ -10,7 +10,7 @@ pub struct WebgpuBackend;
 
 impl WebgpuBackend {
     pub fn descriptor() -> BackendCapability {
-        BackendCapability::from_parts("webgpu", Self::default().capabilities())
+        BackendCapability::from_parts("webgpu", Self.capabilities())
     }
 }
 

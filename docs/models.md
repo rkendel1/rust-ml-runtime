@@ -71,6 +71,20 @@ catalog entries. Installing does not load or execute a model. Existing valid
 packages are reported as already installed unless replacement is explicitly
 requested.
 
+The small built-in registry adds named distributable packages without creating
+a cloud registry. Each entry pins a source, revision, backend, authoritative
+artifact layout, and file checksums. `RegisteredModelInstaller` streams HTTPS
+files (or copies an explicit development source) into staging, verifies every
+declared checksum, writes the model-neutral runtime manifest, and atomically
+publishes the versioned package. On macOS the default root is
+`~/Library/Application Support/ml-runtime/models`; set
+`ML_RUNTIME_MODEL_DIR` to override it.
+
+Laya is the first entry. Its installed layout keeps `model.mlpackage`,
+`coreml_config.json`, `rl_agent_config.json`, and tokenizer files together.
+Core ML compilation produces recreatable runtime state; the compiled output is
+not authoritative and does not affect Laya's logical identity.
+
 The CLI supports local package acquisition with:
 
 ```

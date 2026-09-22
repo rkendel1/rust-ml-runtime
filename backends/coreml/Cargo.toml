@@ -13,6 +13,9 @@ ml-runtime-inference = { path = "../../crates/inference" }
 ml-runtime-backend = { path = "../../crates/backend" }
 ml-runtime-model = { path = "../../crates/model" }
 serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2.7"

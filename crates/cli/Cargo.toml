@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-ml-runtime = { path = "../runtime" }
+ml-runtime = { path = "../runtime", features = ["coreml"] }
 ml-runtime-coreml-backend = { path = "../../backends/coreml" }
 ml-runtime-cpu-backend = { path = "../../backends/cpu" }
 ml-runtime-cuda-backend = { path = "../../backends/cuda" }

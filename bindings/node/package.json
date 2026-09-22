@@ -1,0 +1,11 @@
+{
+  "name": "@ml-runtime/node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

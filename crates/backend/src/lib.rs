@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeResult};
+use ml_runtime_inference::{DecisionRequest, DecisionResult, ModelDescription};
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
 use ml_runtime_model::{ModelFormat, ModelHandle, ModelSpec};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackendCapabilities {
@@ -87,4 +89,17 @@ pub trait Backend: Send + Sync {
         request: &InferenceRequest,
         cancellation: Option<CancellationToken>,
     ) -> RuntimeResult<BoxStream<RuntimeResult<InferenceChunk>>>;
+}
+
+/// Loaded model-neutral typed-decision model.
+pub trait DecisionModel: Send + Sync {
+    fn describe(&self) -> ModelDescription;
+    fn decide(&self, request: &DecisionRequest) -> RuntimeResult<DecisionResult>;
+}
+
+/// Backend extension capable of loading a local typed-decision artifact.
+pub trait DecisionModelProvider: Send + Sync {
+    fn name(&self) -> &str;
+    fn supports_artifact(&self, artifact: &Path) -> bool;
+    fn load_decision_model(&self, artifact: &Path) -> RuntimeResult<Box<dyn DecisionModel>>;
 }

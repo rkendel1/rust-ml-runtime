@@ -3,11 +3,14 @@ use ml_runtime::ml_runtime_inference::{
     ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
 };
 use ml_runtime::ml_runtime_model::{
-    FileModelSource, FilesystemModelCatalog, InstallMode, InstallResult, ModelCatalog,
-    ModelFetchRequest, ModelFormat, ModelId, ModelInstaller, ModelLocation, ModelPackage,
-    ModelReference, ModelSourceReference, ModelSpec,
+    default_model_root, BuiltinModelRegistry, FileModelSource, FilesystemModelCatalog, InstallMode,
+    InstallResult, ModelCatalog, ModelFetchRequest, ModelFormat, ModelId, ModelInstaller,
+    ModelLocation, ModelPackage, ModelReference, ModelSourceReference, ModelSpec,
+    RegisteredModelInstaller,
 };
-use ml_runtime::{Runtime, RuntimeCapabilities, VERSION};
+use ml_runtime::{
+    DecisionQuestion, DecisionRequest, DecisionType, Runtime, RuntimeCapabilities, VERSION,
+};
 use ml_runtime_coreml_backend::CoreMlBackend;
 use ml_runtime_cpu_backend::CpuBackend;
 use ml_runtime_cuda_backend::CudaBackend;
@@ -28,6 +31,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Model {
+        #[command(subcommand)]
+        command: RegistryModelCommands,
+    },
+    Laya {
+        input: String,
+        #[arg(long)]
+        models: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Models {
         #[command(subcommand)]
         command: Option<ModelCommands>,
@@ -71,6 +85,22 @@ enum Commands {
     Run(RunArgs),
     Bench(BenchArgs),
     Serve(ServeArgs),
+}
+
+#[derive(Subcommand)]
+enum RegistryModelCommands {
+    Install {
+        model: String,
+        /// Override the configured HTTPS source or use a local package directory.
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        models: Option<String>,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +207,111 @@ struct BenchArgs {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Model {
+            command:
+                RegistryModelCommands::Install {
+                    model,
+                    source,
+                    models,
+                    replace,
+                    json,
+                },
+        } => {
+            let registered = BuiltinModelRegistry.resolve(&model)?;
+            let root = models
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(default_model_root)?;
+            let source = source.or_else(|| {
+                (model == "laya")
+                    .then(|| std::env::var("ML_RUNTIME_LAYA_SOURCE").ok())
+                    .flatten()
+            });
+            let result = RegisteredModelInstaller::new(&root)?
+                .install(
+                    &registered,
+                    source.as_deref(),
+                    if replace {
+                        InstallMode::Replace
+                    } else {
+                        InstallMode::KeepExisting
+                    },
+                    None,
+                )
+                .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "model": registered.name,
+                        "revision": registered.revision,
+                        "backend": registered.backend,
+                        "package_path": result.package_path,
+                        "status": if result.already_installed { "already_installed" } else { "installed" },
+                    }))?
+                );
+            } else {
+                println!(
+                    "model: {}\nrevision: {}\nbackend: {}\nstatus: {}\ninstalled_path: {}",
+                    registered.name,
+                    registered.revision,
+                    registered.backend,
+                    if result.already_installed {
+                        "already_installed"
+                    } else {
+                        "installed"
+                    },
+                    result.package_path.display()
+                );
+            }
+        }
+        Commands::Laya {
+            input,
+            models,
+            json,
+        } => {
+            let root = models
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(default_model_root)?;
+            let runtime = Runtime::builder()
+                .model_root(root)
+                .register_decision_provider(CoreMlBackend)
+                .build();
+            let loaded = runtime.load_model("laya")?;
+            let result = loaded.decide(&DecisionRequest::new(
+                serde_json::Value::String(input),
+                vec![DecisionQuestion {
+                    name: "refund".to_owned(),
+                    instructions: "Does the customer request a refund?".to_owned(),
+                    kind: DecisionType::Noul {
+                        false_description: None,
+                        true_description: None,
+                    },
+                }],
+            ))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("model: laya");
+                println!("backend: {}", result.backend);
+                for decision in &result.decisions {
+                    println!("decision: {} ({})", decision.name, decision.kind);
+                    println!("result: {:?}", decision.value);
+                    println!("probabilities: {:?}", decision.probabilities);
+                }
+                println!(
+                    "latency_ms: {:.3}",
+                    result.execution.latency.as_secs_f64() * 1_000.0
+                );
+                println!(
+                    "model_revision: {}",
+                    result.model.revision.as_deref().unwrap_or("unknown")
+                );
+                println!("artifact_hash: {}", result.provenance.artifact_sha256);
+                println!("artifact: {}", result.provenance.artifact_path.display());
+            }
+        }
         Commands::Models {
             command: None,
             models,
@@ -775,12 +910,12 @@ fn build_runtime(
     endpoint: Option<&str>,
 ) -> Runtime {
     let mut builder = Runtime::builder()
-        .register_backend(CpuBackend::default())
-        .register_backend(CoreMlBackend::default())
-        .register_backend(OnnxBackend::default())
-        .register_backend(CudaBackend::default())
-        .register_backend(WebgpuBackend::default())
-        .register_provider(LocalProvider::default())
+        .register_backend(CpuBackend)
+        .register_backend(CoreMlBackend)
+        .register_backend(OnnxBackend)
+        .register_backend(CudaBackend)
+        .register_backend(WebgpuBackend)
+        .register_provider(LocalProvider)
         .register_provider(HttpProvider::new(
             endpoint.unwrap_or("https://example.invalid"),
         ))

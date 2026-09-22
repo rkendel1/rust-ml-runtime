@@ -85,6 +85,23 @@ backend details behind the runtime boundary.
 
 ## Models and server
 
+### Native Laya distribution (macOS)
+
+Install the pinned Laya package into the runtime-owned application data
+directory, then execute it without Python or a Hugging Face CLI:
+
+```text
+ml-runtime model install laya
+ml-runtime laya "The customer asks for a refund."
+```
+
+`ML_RUNTIME_MODEL_DIR` overrides the installed-model root. Development and
+offline tests can override the registry source with `--source ./models/laya`
+or `ML_RUNTIME_LAYA_SOURCE`; normal installation uses the registry's pinned
+HTTPS snapshot. The authoritative artifact remains `model.mlpackage` plus its
+tokenizer and configuration. Core ML's compiled representation is disposable
+runtime state under the runtime cache and is never used as package identity.
+
 The server owns model packages and clients send model identities, not server
 filesystem paths:
 

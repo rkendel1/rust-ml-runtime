@@ -5,6 +5,7 @@ use std::{
     any::Any,
     collections::BTreeMap,
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -499,7 +500,7 @@ impl ModelCatalog for FilesystemModelCatalog {
             .into_iter()
             .filter(|descriptor| {
                 descriptor.id.name == name
-                    && version.map_or(true, |version| descriptor.id.version == version)
+                    && version.is_none_or(|version| descriptor.id.version == version)
             })
             .collect::<Vec<_>>();
         match matches.as_slice() {
@@ -858,9 +859,8 @@ impl ModelSource for HttpModelSource {
             .map_err(AcquisitionError::Catalog)?;
         Ok(ModelArtifact {
             package_path: destination.to_path_buf(),
-            bytes: artifact_size(&package.artifact)
-                .map_err(|error| AcquisitionError::Catalog(error))?,
-            sha256: sha256(&package.artifact).map_err(|error| AcquisitionError::Catalog(error))?,
+            bytes: artifact_size(&package.artifact).map_err(AcquisitionError::Catalog)?,
+            sha256: sha256(&package.artifact).map_err(AcquisitionError::Catalog)?,
         })
     }
 }
@@ -1120,6 +1120,448 @@ fn copy_package_entry(
     Ok(())
 }
 
+/// A pinned model package known to the runtime. This is installation metadata,
+/// not inference behavior; adapters remain responsible for model-specific semantics.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisteredModel {
+    pub name: String,
+    pub revision: String,
+    pub source: String,
+    pub backend: String,
+    pub runtime_requirement: String,
+    pub format: ModelFormat,
+    pub artifact_path: String,
+    pub files: Vec<RegisteredModelFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisteredModelFile {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BuiltinModelRegistry;
+
+impl BuiltinModelRegistry {
+    pub fn list(&self) -> Vec<RegisteredModel> {
+        vec![laya_registration()]
+    }
+
+    pub fn resolve(&self, name: &str) -> Result<RegisteredModel, AcquisitionError> {
+        self.list()
+            .into_iter()
+            .find(|model| model.name == name)
+            .ok_or_else(|| {
+                AcquisitionError::InvalidRequest(format!("unknown registered model {name:?}"))
+            })
+    }
+}
+
+fn laya_registration() -> RegisteredModel {
+    const REVISION: &str = "fff78b2d9750c6b748fe8c90fcbf8bed0a1522a9";
+    let files = [
+        (
+            "coreml_config.json",
+            "990b99a736f64c87da57b203d7953c4c1c79c18b615580db894e9c24bda42ab5",
+        ),
+        (
+            "validation.json",
+            "709e1a0ac95a7bf73df0b5a8582423c9f40c80a1b4edd3499a77a1ac2ac39731",
+        ),
+        (
+            "encoder/config.json",
+            "bf3ab80598fdccf414855a2ce80f22859e4492d06ca8a62ddd1cfb63972f8979",
+        ),
+        (
+            "rl_agent_config.json",
+            "ae287b56bbcf5f8c4f4541ae9dfd00c914c4c48b940b8398c3058af37ba92bbd",
+        ),
+        (
+            "tokenizer/tokenizer.json",
+            "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        ),
+        (
+            "tokenizer/tokenizer_config.json",
+            "50044de60daaa73df97d262e15a40d4faf0160e7d742df64b377877a1320dd12",
+        ),
+        (
+            "model.mlpackage/Manifest.json",
+            "41bab6e532f727e8809c76906f41026a48ef9b276c56068b3d68270a13981e20",
+        ),
+        (
+            "model.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+            "dc6a6383ad4a2f04f7525924b0dfb830429dedc44387f143a2f87782e39aeab0",
+        ),
+        (
+            "model.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+            "5872b9f6530c20a845b69c0cb75aa141e9c89ffdd5f36529c3708cec9b7a7a83",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, sha256)| RegisteredModelFile {
+        path: path.to_owned(),
+        sha256: sha256.to_owned(),
+    })
+    .collect();
+    RegisteredModel {
+        name: "laya".to_owned(),
+        revision: REVISION.to_owned(),
+        source: format!("https://huggingface.co/aac6fef/laya-coreml/resolve/{REVISION}"),
+        backend: "coreml".to_owned(),
+        runtime_requirement: ">=0.1.0".to_owned(),
+        format: ModelFormat::CoreMl,
+        artifact_path: "model.mlpackage".to_owned(),
+        files,
+    }
+}
+
+pub fn default_model_root() -> Result<PathBuf, AcquisitionError> {
+    if let Some(root) = std::env::var_os("ML_RUNTIME_MODEL_DIR") {
+        return Ok(PathBuf::from(root));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+        return Ok(PathBuf::from(root).join("ml-runtime/models"));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        AcquisitionError::InvalidRequest(
+            "cannot determine model directory; set ML_RUNTIME_MODEL_DIR".to_owned(),
+        )
+    })?;
+    #[cfg(target_os = "windows")]
+    return Ok(PathBuf::from(home).join("AppData/Local/ml-runtime/models"));
+    #[cfg(target_os = "macos")]
+    return Ok(PathBuf::from(home).join("Library/Application Support/ml-runtime/models"));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Ok(PathBuf::from(home).join(".local/share/ml-runtime/models"))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegisteredInstallResult {
+    pub package_path: PathBuf,
+    pub already_installed: bool,
+}
+
+pub struct RegisteredModelInstaller {
+    root: PathBuf,
+    client: reqwest::Client,
+    config: AcquisitionConfig,
+}
+
+impl RegisteredModelInstaller {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, AcquisitionError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        Ok(Self {
+            root: root.into(),
+            client,
+            config: AcquisitionConfig::default(),
+        })
+    }
+
+    pub fn with_config(mut self, config: AcquisitionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn installed_path(&self, model: &RegisteredModel) -> PathBuf {
+        self.root.join(&model.name).join(&model.revision)
+    }
+
+    pub fn validate(
+        &self,
+        model: &RegisteredModel,
+        package: &Path,
+    ) -> Result<(), AcquisitionError> {
+        let manifest =
+            ModelPackage::open(package).map_err(|reason| AcquisitionError::InvalidPackage {
+                path: package.to_path_buf(),
+                reason,
+            })?;
+        let id = package_id(&manifest)?;
+        let expected =
+            ModelId::new(&model.name, &model.revision).map_err(AcquisitionError::Catalog)?;
+        if id != expected || manifest.manifest.format != model.format {
+            return Err(AcquisitionError::IdentityMismatch {
+                requested: expected,
+                found: id,
+            });
+        }
+        if manifest.manifest.artifact.path != model.artifact_path {
+            return Err(AcquisitionError::InvalidPackage {
+                path: package.to_path_buf(),
+                reason: format!(
+                    "registered artifact path must be {:?}, got {:?}",
+                    model.artifact_path, manifest.manifest.artifact.path
+                ),
+            });
+        }
+        if !runtime_requirement_satisfied(&model.runtime_requirement, env!("CARGO_PKG_VERSION")) {
+            return Err(AcquisitionError::InvalidPackage {
+                path: package.to_path_buf(),
+                reason: format!(
+                    "model requires runtime {}, current runtime is {}",
+                    model.runtime_requirement,
+                    env!("CARGO_PKG_VERSION")
+                ),
+            });
+        }
+        for file in &model.files {
+            let path = safe_registered_path(package, &file.path)?;
+            let actual = sha256_file_streaming(&path)?;
+            if !actual.eq_ignore_ascii_case(&file.sha256) {
+                return Err(AcquisitionError::InvalidPackage {
+                    path,
+                    reason: format!("sha256 mismatch: expected {}, got {actual}", file.sha256),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn install(
+        &self,
+        model: &RegisteredModel,
+        source_override: Option<&str>,
+        mode: InstallMode,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<RegisteredInstallResult, AcquisitionError> {
+        let final_path = self.installed_path(model);
+        if final_path.exists() && mode == InstallMode::KeepExisting {
+            self.validate(model, &final_path)?;
+            return Ok(RegisteredInstallResult {
+                package_path: final_path,
+                already_installed: true,
+            });
+        }
+        fs::create_dir_all(&self.root).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let staging_root = self.root.join(".staging");
+        fs::create_dir_all(&staging_root)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let staging = staging_root.join(format!("{}-{}", model.name, std::process::id()));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        }
+        fs::create_dir_all(&staging).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let source = source_override.unwrap_or(&model.source);
+        let result = async {
+            let mut downloaded = 0_u64;
+            if source.starts_with("https://") || source.starts_with("http://") {
+                validate_http_uri(source, false)?;
+                for file in &model.files {
+                    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(AcquisitionError::Cancelled);
+                    }
+                    let destination = safe_registered_path(&staging, &file.path)?;
+                    if let Some(parent) = destination.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+                    }
+                    self.download_file(
+                        &format!("{}/{}", source.trim_end_matches('/'), file.path),
+                        &destination,
+                        &mut downloaded,
+                        cancellation,
+                    )
+                    .await?;
+                }
+            } else {
+                let source = Path::new(source);
+                if !source.is_dir() {
+                    return Err(AcquisitionError::InvalidRequest(format!(
+                        "registered model source is not a directory: {}",
+                        source.display()
+                    )));
+                }
+                for file in &model.files {
+                    let from = safe_registered_path(source, &file.path)?;
+                    let to = safe_registered_path(&staging, &file.path)?;
+                    if let Some(parent) = to.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+                    }
+                    let size = fs::metadata(&from)
+                        .map_err(|error| AcquisitionError::Io(error.to_string()))?
+                        .len();
+                    downloaded = downloaded.saturating_add(size);
+                    if downloaded > self.config.max_download_bytes {
+                        return Err(AcquisitionError::LimitExceeded {
+                            limit: self.config.max_download_bytes,
+                            actual: downloaded,
+                        });
+                    }
+                    fs::copy(&from, &to)
+                        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+                }
+            }
+            write_registered_manifest(&staging, model)?;
+            self.validate(model, &staging)?;
+            let parent = final_path.parent().expect("registered model has parent");
+            fs::create_dir_all(parent).map_err(|error| AcquisitionError::Io(error.to_string()))?;
+            if final_path.exists() {
+                if mode != InstallMode::Replace {
+                    return Err(AcquisitionError::AlreadyInstalled(
+                        ModelId::new(&model.name, &model.revision)
+                            .map_err(AcquisitionError::Catalog)?,
+                    ));
+                }
+                let backup = parent.join(format!(".replace-{}", std::process::id()));
+                fs::rename(&final_path, &backup)
+                    .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+                if let Err(error) = fs::rename(&staging, &final_path) {
+                    let _ = fs::rename(&backup, &final_path);
+                    return Err(AcquisitionError::Io(error.to_string()));
+                }
+                let _ = fs::remove_dir_all(backup);
+            } else {
+                fs::rename(&staging, &final_path)
+                    .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+            }
+            Ok(RegisteredInstallResult {
+                package_path: final_path.clone(),
+                already_installed: false,
+            })
+        }
+        .await;
+        if staging.exists() {
+            let _ = fs::remove_dir_all(staging);
+        }
+        result
+    }
+
+    async fn download_file(
+        &self,
+        url: &str,
+        destination: &Path,
+        downloaded: &mut u64,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), AcquisitionError> {
+        validate_http_uri(url, false)?;
+        let mut response = tokio::time::timeout(
+            std::time::Duration::from_secs(self.config.timeout_secs),
+            self.client.get(url).send(),
+        )
+        .await
+        .map_err(|_| AcquisitionError::Io(format!("download timed out: {url}")))?
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        let mut output = fs::File::create(destination)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?
+        {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(AcquisitionError::Cancelled);
+            }
+            *downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if *downloaded > self.config.max_download_bytes {
+                return Err(AcquisitionError::LimitExceeded {
+                    limit: self.config.max_download_bytes,
+                    actual: *downloaded,
+                });
+            }
+            output
+                .write_all(&chunk)
+                .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        }
+        output
+            .sync_all()
+            .map_err(|error| AcquisitionError::Io(error.to_string()))
+    }
+}
+
+fn safe_registered_path(root: &Path, relative: &str) -> Result<PathBuf, AcquisitionError> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(AcquisitionError::InvalidRequest(
+            "registered file path must remain inside the package".to_owned(),
+        ));
+    }
+    Ok(root.join(relative))
+}
+
+fn sha256_file_streaming(path: &Path) -> Result<String, AcquisitionError> {
+    let mut file = fs::File::open(path).map_err(|error| AcquisitionError::InvalidPackage {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 8 * 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| AcquisitionError::Io(error.to_string()))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn write_registered_manifest(
+    destination: &Path,
+    model: &RegisteredModel,
+) -> Result<(), AcquisitionError> {
+    let manifest = ModelManifest {
+        schema_version: 1,
+        id: model.name.clone(),
+        model_version: Some(model.revision.clone()),
+        version: None,
+        format: model.format.clone(),
+        artifact: ArtifactSpec {
+            path: model.artifact_path.clone(),
+            size_bytes: None,
+            sha256: None,
+        },
+        metadata: BTreeMap::from([
+            ("backend".to_owned(), model.backend.clone()),
+            ("source".to_owned(), model.source.clone()),
+            ("registry_revision".to_owned(), model.revision.clone()),
+            (
+                "runtime_requirement".to_owned(),
+                model.runtime_requirement.clone(),
+            ),
+        ]),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+    };
+    fs::write(
+        destination.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| AcquisitionError::InvalidRequest(error.to_string()))?,
+    )
+    .map_err(|error| AcquisitionError::Io(error.to_string()))
+}
+
+fn runtime_requirement_satisfied(requirement: &str, current: &str) -> bool {
+    let Some(required) = requirement.strip_prefix(">=") else {
+        return requirement == current || requirement == "*";
+    };
+    let key = |version: &str| {
+        let mut parts = version
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0));
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    };
+    key(current) >= key(required)
+}
+
 #[derive(Clone)]
 pub struct ModelHandle {
     model_id: String,
@@ -1173,8 +1615,9 @@ impl std::fmt::Debug for ModelHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactSpec, FilesystemModelCatalog, ModelCatalog, ModelFormat, ModelManifest,
-        ModelReference,
+        ArtifactSpec, BuiltinModelRegistry, FilesystemModelCatalog, InstallMode, ModelCatalog,
+        ModelFormat, ModelManifest, ModelReference, RegisteredModel, RegisteredModelFile,
+        RegisteredModelInstaller,
     };
     use std::{fs, path::PathBuf};
 
@@ -1185,6 +1628,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(manifest.format, ModelFormat::Onnx);
+    }
+
+    #[test]
+    fn builtin_registry_pins_laya_distribution_metadata() {
+        let laya = BuiltinModelRegistry.resolve("laya").unwrap();
+        assert_eq!(laya.backend, "coreml");
+        assert_eq!(laya.format, ModelFormat::CoreMl);
+        assert_eq!(laya.artifact_path, "model.mlpackage");
+        assert!(laya.source.contains(&laya.revision));
+        assert!(laya
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("weights/weight.bin")));
+        assert!(BuiltinModelRegistry.resolve("missing").is_err());
+    }
+
+    #[tokio::test]
+    async fn registered_installer_discovers_validates_and_rejects_corruption() {
+        let root = std::env::temp_dir().join(format!(
+            "ml-runtime-registered-install-{}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        let installed = root.join("installed");
+        std::fs::create_dir_all(source.join("model.mlpackage")).unwrap();
+        std::fs::write(source.join("config.json"), b"config").unwrap();
+        std::fs::write(source.join("model.mlpackage/Manifest.json"), b"package").unwrap();
+        let digest = |path: &std::path::Path| super::sha256_file_streaming(path).unwrap();
+        let model = RegisteredModel {
+            name: "fixture".to_owned(),
+            revision: "revision-1".to_owned(),
+            source: "https://example.invalid/fixture".to_owned(),
+            backend: "coreml".to_owned(),
+            runtime_requirement: ">=0.1.0".to_owned(),
+            format: ModelFormat::CoreMl,
+            artifact_path: "model.mlpackage".to_owned(),
+            files: vec![
+                RegisteredModelFile {
+                    path: "config.json".to_owned(),
+                    sha256: digest(&source.join("config.json")),
+                },
+                RegisteredModelFile {
+                    path: "model.mlpackage/Manifest.json".to_owned(),
+                    sha256: digest(&source.join("model.mlpackage/Manifest.json")),
+                },
+            ],
+        };
+        let installer = RegisteredModelInstaller::new(&installed).unwrap();
+        let result = installer
+            .install(
+                &model,
+                Some(source.to_str().unwrap()),
+                InstallMode::KeepExisting,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.package_path, installed.join("fixture/revision-1"));
+        assert!(result.package_path.join("manifest.json").is_file());
+        installer.validate(&model, &result.package_path).unwrap();
+
+        let existing = installer
+            .install(
+                &model,
+                Some(source.to_str().unwrap()),
+                InstallMode::KeepExisting,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(existing.already_installed);
+        std::fs::write(existing.package_path.join("config.json"), b"corrupt").unwrap();
+        assert!(installer.validate(&model, &existing.package_path).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

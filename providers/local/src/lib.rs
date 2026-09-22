@@ -9,7 +9,7 @@ pub struct LocalProvider;
 
 impl LocalProvider {
     pub fn descriptor() -> ProviderCapability {
-        ProviderCapability::from_parts("local", Self::default().capabilities())
+        ProviderCapability::from_parts("local", Self.capabilities())
     }
 }
 
