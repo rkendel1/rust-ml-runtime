@@ -85,8 +85,8 @@ not require the network and never silently download, compile, or repair state.
 
 | Platform | Native runtime | Laya / Core ML |
 | --- | --- | --- |
-| macOS arm64 | Supported | Supported |
-| macOS x64 | Supported | Supported where the host Core ML version permits |
+| macOS arm64 | Supported | Supported on macOS 15+ |
+| macOS x64 | Supported | Supported on macOS 15+ where the host Core ML version permits |
 | Linux x64 | Supported | Unavailable |
 | Linux arm64 | Supported | Unavailable |
 | Windows x64 | Supported | Unavailable |

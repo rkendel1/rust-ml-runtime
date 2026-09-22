@@ -21,8 +21,8 @@ ml-runtime laya "The customer asks for a refund."
 ```
 
 The runtime and installed model execute locally. The first product path uses
-Laya through Core ML on macOS; Linux and Windows receive the native runtime but
-cannot execute this Core ML model. Model installation may use the network,
+Laya through Core ML on macOS 15+; Linux and Windows receive the native runtime
+but cannot execute this Core ML model. Model installation may use the network,
 while inference from a READY installation does not.
 
 ## Install
