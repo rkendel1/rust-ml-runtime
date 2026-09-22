@@ -3,6 +3,8 @@
 ## 0.1.0
 
 - First Python-free native release of the `ml-runtime` CLI and Rust runtime.
+- Added the public `rust-ml-runtime` crates.io package and packaged external
+  Rust-consumer validation.
 - Added explicit Laya installation, verification, diagnosis, prepared Core ML
   execution, offline inference, and removal on compatible macOS hosts.
 - Added typed decisions, probabilities, latency, and model/runtime provenance.

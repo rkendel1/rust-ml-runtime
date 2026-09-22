@@ -1,4 +1,4 @@
-use ml_runtime::{DecisionOption, DecisionQuestion, DecisionRequest, DecisionType, Runtime};
+use rust_ml_runtime::{DecisionOption, DecisionQuestion, DecisionRequest, DecisionType, Runtime};
 use serde_json::Value;
 use std::{env, path::PathBuf};
 

@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use ml_runtime::{
+use rust_ml_runtime::{
     CancellationToken, ExecutionPolicy, FilesystemModelCatalog, InferenceOptions, InferenceRequest,
     InferenceStreamEvent, Input, ModelReference, Output, Runtime, RuntimeError, Tensor,
 };

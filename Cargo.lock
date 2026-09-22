@@ -1142,31 +1142,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ml-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-core",
- "futures-util",
- "ml-runtime-backend",
- "ml-runtime-common",
- "ml-runtime-coreml-backend",
- "ml-runtime-cpu-backend",
- "ml-runtime-http-provider",
- "ml-runtime-inference",
- "ml-runtime-model",
- "ml-runtime-onnx-backend",
- "ml-runtime-provider",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
-]
-
-[[package]]
 name = "ml-runtime-backend"
 version = "0.1.0"
 dependencies = [
@@ -1181,9 +1156,9 @@ dependencies = [
 name = "ml-runtime-benchmarks"
 version = "0.1.0"
 dependencies = [
- "ml-runtime",
  "ml-runtime-cpu-backend",
  "ml-runtime-model",
+ "rust-ml-runtime",
  "serde_json",
  "tokio",
 ]
@@ -1194,7 +1169,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
- "ml-runtime",
  "ml-runtime-coreml-backend",
  "ml-runtime-cpu-backend",
  "ml-runtime-cuda-backend",
@@ -1204,6 +1178,7 @@ dependencies = [
  "ml-runtime-onnx-backend",
  "ml-runtime-server-provider",
  "ml-runtime-webgpu-backend",
+ "rust-ml-runtime",
  "serde_json",
  "tokio",
 ]
@@ -1320,10 +1295,10 @@ dependencies = [
 name = "ml-runtime-node"
 version = "0.1.0"
 dependencies = [
- "ml-runtime",
  "napi",
  "napi-build",
  "napi-derive",
+ "rust-ml-runtime",
  "serde_json",
 ]
 
@@ -1368,13 +1343,13 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
- "ml-runtime",
  "ml-runtime-common",
  "ml-runtime-http-provider",
  "ml-runtime-inference",
  "ml-runtime-model",
  "ml-runtime-protocol",
  "ml-runtime-provider",
+ "rust-ml-runtime",
  "serde",
  "serde_json",
  "tokio",
@@ -1992,6 +1967,31 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rust-ml-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "ml-runtime-backend",
+ "ml-runtime-common",
+ "ml-runtime-coreml-backend",
+ "ml-runtime-cpu-backend",
+ "ml-runtime-http-provider",
+ "ml-runtime-inference",
+ "ml-runtime-model",
+ "ml-runtime-onnx-backend",
+ "ml-runtime-provider",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@ A native local ML runtime for applications without Python.
 ## Included
 
 - Native Rust CLI releases for macOS, Linux, and Windows
+- Rust library distribution through `rust-ml-runtime = "0.1"` on crates.io
 - Explicit model installation, verification, diagnosis, and removal
 - SHA-256 verification for runtime and model artifacts
 - Local Core ML execution with READY/offline lifecycle semantics
@@ -12,6 +13,8 @@ A native local ML runtime for applications without Python.
 - In-process Node/TypeScript integration through `@rust-ml-runtime/node`
 - A standalone healthcare decision demonstration through the public Node API
 - Laya model support on compatible macOS hosts
+
+Models remain separately distributed and are not embedded in the Rust crate.
 
 ## Example
 

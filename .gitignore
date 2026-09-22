@@ -3,3 +3,4 @@
 /bindings/node/native
 /bindings/node/npm/*/ml_runtime_node.node
 node_modules
+.env.local

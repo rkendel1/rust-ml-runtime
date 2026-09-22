@@ -3,9 +3,13 @@ name = "ml-runtime-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Provider contracts for rust-ml-runtime"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ml-runtime-provider"
 
 [dependencies]
 async-trait.workspace = true
-ml-runtime-common = { path = "../common" }
-ml-runtime-inference = { path = "../inference" }
+ml-runtime-common = { version = "0.1.0", path = "../common" }
+ml-runtime-inference = { version = "0.1.0", path = "../inference" }
 serde.workspace = true

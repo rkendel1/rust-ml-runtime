@@ -3,9 +3,10 @@ name = "ml-runtime-benchmarks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
-ml-runtime = { path = "../crates/runtime" }
+ml-runtime = { package = "rust-ml-runtime", path = "../crates/runtime" }
 ml-runtime-cpu-backend = { path = "../backends/cpu" }
 ml-runtime-model = { path = "../crates/model" }
 serde_json.workspace = true

@@ -27,6 +27,22 @@ while inference from a READY installation does not.
 
 ## Install
 
+Rust applications use the public crate:
+
+```toml
+[dependencies]
+rust-ml-runtime = "0.1"
+```
+
+Node applications use the platform-selecting package:
+
+```sh
+npm install @rust-ml-runtime/node
+```
+
+The CLI is distributed as a native release artifact. Models are installed
+separately and are not bundled in the Rust crate, npm package, or CLI archive.
+
 The quickest installation on macOS and Linux is the verified installer:
 
 ```sh
@@ -73,7 +89,7 @@ ml-runtime inspect example-linear@1 --models models
 For embedding, the canonical Rust surface is model + input + options → result:
 
 ```rust
-use ml_runtime::{FilesystemModelCatalog, InferenceRequest, ModelReference, Runtime};
+use rust_ml_runtime::{FilesystemModelCatalog, InferenceRequest, ModelReference, Runtime};
 
 let runtime = Runtime::builder()
     .catalog(FilesystemModelCatalog::new("examples/models"))
@@ -134,9 +150,10 @@ supported routes are `/v1/health`, `/v1/capabilities`, `/v1/models`,
 `/v1/infer`, and `/v1/infer/stream`. Protocol versions are independent of
 patch releases, but incompatible wire changes require a new API version.
 
-Workspace crates other than the runtime and CLI, backend crates, providers, and
-model/protocol crates are implementation details. ONNX and Core ML remain
-backend details behind the runtime boundary.
+The support crates required by `rust-ml-runtime` are implementation details;
+applications should depend only on `rust-ml-runtime`. The CLI is a separate
+native product. ONNX and Core ML remain backend details behind the runtime
+boundary.
 
 ## Models and server
 

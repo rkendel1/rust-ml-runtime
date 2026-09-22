@@ -70,9 +70,9 @@ tensor backend and contains no decision semantics.
 Run the real-model test and smoke path on macOS with a local artifact:
 
 ```text
-LAYA_MODEL_PATH=./models/laya cargo test -p ml-runtime --features coreml \
+LAYA_MODEL_PATH=./models/laya cargo test -p rust-ml-runtime --features coreml \
   --test laya_coreml -- --nocapture
-cargo run -p ml-runtime --features coreml --example laya -- \
+cargo run -p rust-ml-runtime --features coreml --example laya -- \
   --model ./models/laya \
   --input "The customer asks for a refund of a duplicate payment."
 ```
