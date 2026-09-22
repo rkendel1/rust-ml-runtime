@@ -92,6 +92,12 @@ for (const name of [nodeRoot.name, ...Object.keys(nodeRoot.optionalDependencies)
 
 const cargoSelection = crateOrder.flatMap((name) => ['-p', name]);
 run('cargo', ['publish', '--dry-run', ...cargoSelection]);
-run('cargo', ['publish', ...cargoSelection]);
+for (const [index, name] of crateOrder.entries()) {
+  run('cargo', ['publish', '-p', name]);
+  if (index < crateOrder.length - 1) {
+    // crates.io needs time to make each newly published dependency visible.
+    run('sleep', ['15']);
+  }
+}
 for (const path of platformPackages) run('npm', ['publish', '--access', 'public', path]);
 run('npm', ['publish', '--access', 'public', rootPackages[0]]);

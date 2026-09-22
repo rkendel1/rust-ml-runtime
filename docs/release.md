@@ -51,7 +51,8 @@ valid only when its runtime requirement and artifact identities match.
 ## Publishing
 
 The release job runs `npm run publish:packages`, which publishes the required
-Rust support crates followed by `rust-ml-runtime`, then native npm packages
+Rust support crates one at a time in dependency order (allowing crates.io to
+index each dependency) followed by `rust-ml-runtime`, then native npm packages
 followed by the public wrapper. GitHub release artifacts are uploaded only
 after registry publication succeeds. `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN`
 must have the corresponding publish access. Registry preflight rejects any
