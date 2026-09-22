@@ -283,6 +283,8 @@ ml-runtime bench mnist-8@8 \
 ```
 
 The report includes model/version, provider, backend, execution target, model
-load time, iteration count, latency, and throughput. The equivalent public-API
-examples are runnable with `cargo run -p ml-runtime-cli --example mnist` and
-are also provided in `examples/typescript/mnist.ts` for `@ml-runtime/core`.
+load time, iteration count, latency, and throughput. The equivalent Rust
+public-API example is runnable with `cargo run -p ml-runtime-cli --example
+mnist`. `examples/typescript/mnist.ts` exercises the repository's private,
+unpublished subprocess development binding; the public native Node package is
+documented in [Node and TypeScript](docs/node.md).

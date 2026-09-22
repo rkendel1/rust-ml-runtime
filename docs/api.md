@@ -128,9 +128,12 @@ and `.remote(...)` and select an explicit execution policy.
 
 ## TypeScript
 
-`@ml-runtime/core` is a thin subprocess projection and requires an installed
-`ml-runtime` executable. It accepts typed model references and text/tensor
-inputs and returns typed runtime output and metadata. `RuntimeClientError`
+The public native package is [`@rust-ml-runtime/node`](node.md). The repository
+also contains a private, unpublished `@ml-runtime/core` development binding. It
+is a thin subprocess projection that requires an installed `ml-runtime`
+executable and is not part of the v0.1.0 distributable surface. It accepts
+typed model references and text/tensor inputs and returns typed runtime output
+and metadata. `RuntimeClientError`
 separates process and JSON protocol bridge failures without recreating Rust
 inference semantics. Streaming is supported. The current subprocess bridge
 does not expose Rust's batch or cancellation-token APIs; it does not emulate
