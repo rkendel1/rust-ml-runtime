@@ -1,6 +1,9 @@
 # ML Runtime
 
-`ml-runtime` is a Rust-native runtime for local, remote, and hybrid ML inference.
+`ml-runtime` is a Rust-native capability runtime for intelligent applications.
+ML was the initial capability family; the runtime now provides common discovery,
+execution, policy, limits, and evidence for intelligence, data, filesystem,
+process, network, and developer-tool capabilities.
 The supported developer surfaces are the `ml-runtime` executable, the Rust
 runtime crate, and the thin `@ml-runtime/core` TypeScript package.
 
@@ -23,6 +26,7 @@ ml-runtime --version
 ml-runtime doctor
 ml-runtime models
 ml-runtime capabilities
+ml-runtime capabilities inspect filesystem.read
 ml-runtime run examples/models/linear --tensor 1,2 --shape 2
 ml-runtime bench
 ```
@@ -60,6 +64,12 @@ Developer documentation is organized from usage toward implementation:
 8. [Architecture](docs/architecture.md)
 
 ## Release surface and compatibility
+
+Applications use the same capability lifecycle—discover, resolve, authorize,
+execute, observe, and return evidence—without depending on the library behind a
+provider. Sensitive capabilities fail closed unless an application supplies its
+authorization hook and explicit resource policy. Providers can be added behind
+the runtime's capability boundary without changing application code.
 
 The CLI and Rust API use the workspace version (`0.1.0` currently), exposed by
 `ml-runtime --version` and `CARGO_PKG_VERSION`. The wire protocol is `/v1`;
