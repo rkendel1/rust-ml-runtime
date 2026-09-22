@@ -47,6 +47,8 @@ enum Commands {
     Providers,
     Backends,
     Capabilities {
+        #[command(subcommand)]
+        command: Option<CapabilityCommands>,
         #[arg(long)]
         json: bool,
     },
@@ -66,6 +68,15 @@ enum Commands {
     Run(RunArgs),
     Bench(BenchArgs),
     Serve(ServeArgs),
+}
+
+#[derive(Subcommand)]
+enum CapabilityCommands {
+    Inspect {
+        capability: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -318,7 +329,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Commands::Capabilities { json } => {
+        Commands::Capabilities {
+            command: Some(CapabilityCommands::Inspect { capability, json }),
+            ..
+        } => {
+            let runtime = build_runtime(None, None, false, false, None);
+            let capability = runtime
+                .capability(&capability)
+                .ok_or_else(|| format!("unknown capability: {capability}"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&capability)?);
+            } else {
+                println!(
+                    "{}\tversion={}\tavailable={}",
+                    capability.id, capability.version, capability.availability
+                );
+                println!("{}", capability.description);
+            }
+        }
+        Commands::Capabilities {
+            json,
+            command: None,
+        } => {
             let runtime = build_runtime(None, None, false, false, None);
             render_capabilities(&runtime.capabilities(), json)?;
         }
@@ -715,6 +747,16 @@ fn render_capabilities(
         println!(
             "  {} (available={}, remote={}, endpoint={:?})",
             provider.name, provider.available, provider.remote, provider.endpoint
+        );
+    }
+    println!("Capabilities:");
+    for capability in &capabilities.capabilities {
+        println!(
+            "  {}@{} (available={}, target={})",
+            capability.id,
+            capability.version,
+            capability.availability,
+            capability.execution_targets.join(",")
         );
     }
     println!("Models:");

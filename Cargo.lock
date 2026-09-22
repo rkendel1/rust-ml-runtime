@@ -827,6 +827,7 @@ dependencies = [
  "ml-runtime-model",
  "ml-runtime-onnx-backend",
  "ml-runtime-provider",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

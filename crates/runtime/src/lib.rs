@@ -23,6 +23,13 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 
+mod capability;
+
+pub use capability::{
+    Capability, CapabilityAuthorizer, CapabilityExecutionMetadata, CapabilityLimits,
+    CapabilityPolicy, ExecutionRequest, ExecutionResult,
+};
+
 pub use ml_runtime_backend;
 pub use ml_runtime_common;
 pub use ml_runtime_common::{CancellationToken, RuntimeError, RuntimeResult};
@@ -75,12 +82,13 @@ pub struct ModelCapability {
     pub backend: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeCapabilities {
     pub platforms: Vec<Platform>,
     pub providers: Vec<ProviderCapability>,
     pub backends: Vec<BackendCapability>,
     pub models: Vec<ModelCapability>,
+    pub capabilities: Vec<Capability>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -660,7 +668,20 @@ impl Runtime {
             providers: self.providers().providers,
             backends: self.backends().backends,
             models: self.models().models,
+            capabilities: capability::catalog(),
         }
+    }
+
+    pub fn capability(&self, id: &str) -> Option<Capability> {
+        capability::find(id)
+    }
+
+    pub async fn execute_capability(
+        &self,
+        request: ExecutionRequest,
+        authorizer: Option<&dyn CapabilityAuthorizer>,
+    ) -> RuntimeResult<ExecutionResult> {
+        capability::execute(request, authorizer).await
     }
 
     pub fn status(&self) -> RuntimeStatus {
