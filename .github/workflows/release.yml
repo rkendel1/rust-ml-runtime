@@ -3,6 +3,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release candidate version to build without publishing
+        required: true
+        default: 0.1.0
+
+env:
+  RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
 
 permissions:
   contents: write
@@ -16,7 +25,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
-      - run: node tools/check-package-versions.mjs "${GITHUB_REF_NAME#v}"
+      - run: node tools/check-package-versions.mjs "${RELEASE_VERSION#v}"
       - run: node tools/check-release-boundary.mjs
       - run: npm pack --dry-run
         working-directory: bindings/node
@@ -48,7 +57,7 @@ jobs:
           NPM_PLATFORM: ${{ matrix.npm_platform }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_VERSION#v}"
           expected="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ml-runtime-cli") | .version')"
           test "$version" = "$expected"
           dir="ml-runtime-v${version}-${PLATFORM}"
@@ -100,7 +109,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_VERSION#v}"
           while IFS= read -r checksum; do
             (cd "$(dirname "$checksum")" && sha256sum -c "$(basename "$checksum")")
           done < <(find artifacts -name '*.sha256' -type f | sort)
@@ -111,7 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_VERSION#v}"
           destination="$(mktemp -d)"
           release_base="file://${GITHUB_WORKSPACE}/artifacts/linux-x86_64"
           ML_RUNTIME_VERSION="$version" ML_RUNTIME_RELEASE_BASE="$release_base" ML_RUNTIME_INSTALL_DIR="$destination" ./install.sh
@@ -191,6 +200,7 @@ jobs:
 
   publish:
     needs: [package, metadata, verify-laya-release]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -239,7 +249,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_VERSION#v}"
           destination="$(mktemp -d)"
           ML_RUNTIME_VERSION="$version" ML_RUNTIME_INSTALL_DIR="$destination" ./install.sh
           actual="$(env -i HOME="$(mktemp -d)" PATH="$(mktemp -d)" "$destination/ml-runtime" --version)"
@@ -248,7 +258,7 @@ jobs:
         if: matrix.shell == 'pwsh'
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $version = $env:RELEASE_VERSION.TrimStart("v")
           $destination = Join-Path $env:RUNNER_TEMP "ml-runtime-published"
           $env:ML_RUNTIME_VERSION = $version
           $env:ML_RUNTIME_INSTALL_DIR = $destination
@@ -278,7 +288,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_VERSION#v}"
           destination="$(mktemp -d)"
           ML_RUNTIME_VERSION="$version" ML_RUNTIME_INSTALL_DIR="$destination" ./install.sh
           root="$(mktemp -d)"
