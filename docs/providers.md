@@ -19,3 +19,27 @@ returning the common `ExecutionResult` evidence envelope.
 
 Sensitive providers must require the application's `CapabilityAuthorizer`.
 The runtime does not grant authority itself.
+
+## Capability packages
+
+Capability providers can be distributed as local packages:
+
+```text
+providers/
+  postgres/
+    manifest.toml
+    provider
+```
+
+`manifest.toml` declares package/provider identity, runtime compatibility,
+capabilities, targets, platforms, backend and configuration requirements, and
+dependencies. The runtime validates this metadata and registers its capabilities
+only when loading is explicitly requested; discovering a package never executes
+the provider binary.
+
+Inspect packages without loading them:
+
+```sh
+ml-runtime providers list --providers providers
+ml-runtime providers inspect providers/postgres
+```

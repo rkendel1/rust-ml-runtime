@@ -27,6 +27,8 @@ ml-runtime doctor
 ml-runtime models
 ml-runtime capabilities
 ml-runtime capabilities inspect filesystem.read
+ml-runtime providers list --providers providers
+ml-runtime providers inspect providers/example
 ml-runtime run examples/models/linear --tensor 1,2 --shape 2
 ml-runtime bench
 ```
