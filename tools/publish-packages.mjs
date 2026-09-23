@@ -64,6 +64,7 @@ async function main() {
     }
     return `rust-ml-runtime-node-${name.slice(`${nodeRoot.name}-`.length)}-${version}.tgz`;
   }).sort();
+  const expectedPlatformPackageSet = new Set(expectedPlatformPackages);
 
   if (!dryRun) {
     if (!npmOnly && !process.env.CARGO_REGISTRY_TOKEN) {
@@ -78,9 +79,8 @@ async function main() {
 
   const npmTarballs = collect(artifacts, (path) => path.endsWith('.tgz')).sort();
   const versionPattern = escapeRegExp(version);
-  const nativePattern = new RegExp(`rust-ml-runtime-node-(?:darwin|linux|win32)-.+-${versionPattern}\\.tgz$`);
   const rootPattern = new RegExp(`rust-ml-runtime-node-${versionPattern}\\.tgz$`);
-  const platformPackages = npmTarballs.filter((path) => nativePattern.test(path));
+  const platformPackages = npmTarballs.filter((path) => expectedPlatformPackageSet.has(basename(path)));
   const rootPackages = npmTarballs.filter((path) => rootPattern.test(path));
   const discoveredPlatformPackages = platformPackages.map((path) => basename(path)).sort();
 
