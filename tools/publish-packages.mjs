@@ -38,6 +38,7 @@ const collect = (directory, predicate, found = []) => {
 };
 const formatPaths = paths => paths.length ? `\n - ${paths.join('\n - ')}` : '\n - (none)';
 const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const readTarJson = (archive, file) => JSON.parse(execFileSync('tar', ['-xOf', archive, `package/${file}`], { encoding: 'utf8' }));
 
 async function main() {
   const releasePackage = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -55,17 +56,6 @@ async function main() {
     }
   }
 
-  const nodeRoot = JSON.parse(readFileSync('bindings/node/package.json', 'utf8'));
-  if (nodeRoot.version !== version) throw new Error(`${nodeRoot.name} is ${nodeRoot.version}; expected ${version}`);
-  const optionalDependencies = nodeRoot.optionalDependencies ?? {};
-  const expectedPlatformPackages = Object.keys(optionalDependencies).map((name) => {
-    if (!name.startsWith(`${nodeRoot.name}-`)) {
-      throw new Error(`Unexpected optional dependency ${name}; expected ${nodeRoot.name}-<platform>`);
-    }
-    return `rust-ml-runtime-node-${name.slice(`${nodeRoot.name}-`.length)}-${version}.tgz`;
-  }).sort();
-  const expectedPlatformPackageSet = new Set(expectedPlatformPackages);
-
   if (!dryRun) {
     if (!npmOnly && !process.env.CARGO_REGISTRY_TOKEN) {
       throw new Error('CARGO_REGISTRY_TOKEN is required for crates.io publication');
@@ -80,12 +70,32 @@ async function main() {
   const npmTarballs = collect(artifacts, (path) => path.endsWith('.tgz')).sort();
   const versionPattern = escapeRegExp(version);
   const rootPattern = new RegExp(`rust-ml-runtime-node-${versionPattern}\\.tgz$`);
-  const platformPackages = npmTarballs.filter((path) => expectedPlatformPackageSet.has(basename(path)));
   const rootPackages = npmTarballs.filter((path) => rootPattern.test(path));
-  const discoveredPlatformPackages = platformPackages.map((path) => basename(path)).sort();
-
   console.log(`Using release artifacts from ${artifacts}`);
   console.log(`Discovered ${npmTarballs.length} npm tarball(s):${formatPaths(npmTarballs)}`);
+  let nodeRoot;
+  if (npmOnly) {
+    if (rootPackages.length !== 1) {
+      throw new Error(
+        `Expected one root npm package tarball for ${version}; found ${rootPackages.length}. ` +
+        `Check that --artifacts points at the release run for version ${version}.`
+      );
+    }
+    nodeRoot = readTarJson(rootPackages[0], 'package.json');
+  } else {
+    nodeRoot = JSON.parse(readFileSync('bindings/node/package.json', 'utf8'));
+  }
+  if (nodeRoot.version !== version) throw new Error(`${nodeRoot.name} is ${nodeRoot.version}; expected ${version}`);
+  const optionalDependencies = nodeRoot.optionalDependencies ?? {};
+  const expectedPlatformPackages = Object.keys(optionalDependencies).map((name) => {
+    if (!name.startsWith(`${nodeRoot.name}-`)) {
+      throw new Error(`Unexpected optional dependency ${name}; expected ${nodeRoot.name}-<platform>`);
+    }
+    return `rust-ml-runtime-node-${name.slice(`${nodeRoot.name}-`.length)}-${version}.tgz`;
+  }).sort();
+  const expectedPlatformPackageSet = new Set(expectedPlatformPackages);
+  const platformPackages = npmTarballs.filter((path) => expectedPlatformPackageSet.has(basename(path)));
+  const discoveredPlatformPackages = platformPackages.map((path) => basename(path)).sort();
   if (
     rootPackages.length !== 1 ||
     JSON.stringify(discoveredPlatformPackages) !== JSON.stringify(expectedPlatformPackages)

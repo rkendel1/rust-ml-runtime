@@ -10,12 +10,16 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const publishScript = path.join(repoRoot, 'tools', 'publish-packages.mjs');
 
 function pack(directory, destination) {
-  const result = spawnSync('npm', ['pack', '--pack-destination', destination], {
+  const result = spawnSync('npm', ['pack'], {
     cwd: directory,
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  return path.join(destination, result.stdout.trim().split(/\r?\n/).at(-1));
+  const name = result.stdout.trim().split(/\r?\n/).at(-1);
+  const source = path.join(directory, name);
+  const target = path.join(destination, name);
+  copyFileSync(source, target);
+  return target;
 }
 
 function makePackage(directory, manifest, files) {
@@ -116,6 +120,6 @@ test('npm-only publish reports an artifact/version mismatch clearly', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /rust-ml-runtime-node-0\.1\.0\.tgz/);
-  assert.match(result.stderr, /Expected native npm tarballs .*0\.2\.0.* and one root package for 0\.2\.0/);
+  assert.match(result.stderr, /Expected one root npm package tarball for 0\.2\.0; found 0/);
   assert.match(result.stderr, /Check that --artifacts points at the release run for version 0\.2\.0/);
 });
