@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const version = (process.argv[2] ?? '').replace(/^v/, '');
 const archiveDirectory = process.argv[3] ?? 'target/package';
@@ -13,11 +13,25 @@ const consumer = join(root, 'consumer');
 mkdirSync(packages);
 cpSync('examples/rust-consumer', consumer, { recursive: true });
 
+const collectArchives = (directory) => {
+  const archives = [];
+  for (const entry of readdirSync(directory)) {
+    const path = join(directory, entry);
+    const stat = lstatSync(path);
+    if (stat.isDirectory()) archives.push(...collectArchives(path));
+    else if (stat.isFile() && entry.endsWith(`-${version}.crate`)) archives.push(path);
+  }
+  return archives;
+};
 const crateNames = [];
-for (const archive of readdirSync(archiveDirectory).filter((name) => name.endsWith('.crate'))) {
-  execFileSync('tar', ['-xzf', join(archiveDirectory, archive), '-C', packages]);
-  crateNames.push(archive.slice(0, -`.crate`.length).slice(0, -(`-${version}`.length)));
+const archives = [...new Map(collectArchives(archiveDirectory).sort().map((path) => [basename(path), path])).values()];
+if (archives.length === 0) throw new Error(`no packaged crates found for version ${version} in ${archiveDirectory}`);
+for (const archive of archives) {
+  execFileSync('tar', ['-xzf', archive, '-C', packages]);
+  const name = basename(archive);
+  crateNames.push(name.slice(0, -`.crate`.length).slice(0, -(`-${version}`.length)));
 }
+if (!crateNames.includes('rust-ml-runtime')) throw new Error(`missing packaged rust-ml-runtime-${version}.crate`);
 const assertNoSymlinks = (directory) => {
   for (const entry of readdirSync(directory)) {
     const path = join(directory, entry);
@@ -29,6 +43,11 @@ const assertNoSymlinks = (directory) => {
 assertNoSymlinks(packages);
 
 let manifest = readFileSync(join(consumer, 'Cargo.toml'), 'utf8');
+const runtimePackagePath = join(packages, `rust-ml-runtime-${version}`);
+const runtimeDependency = `rust-ml-runtime = { version = ${JSON.stringify(`=${version}`)}, path = ${JSON.stringify(runtimePackagePath)} }`;
+const updatedManifest = manifest.replace(/^rust-ml-runtime\s*=.*$/m, runtimeDependency);
+if (updatedManifest === manifest) throw new Error('expected rust-ml-runtime dependency in external consumer manifest');
+manifest = updatedManifest;
 manifest += '\n[patch.crates-io]\n';
 for (const name of crateNames.sort()) {
   manifest += `${JSON.stringify(name)} = { path = ${JSON.stringify(join(packages, `${name}-${version}`))} }\n`;
