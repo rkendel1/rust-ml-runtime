@@ -127,6 +127,9 @@ async function main() {
     return;
   }
 
+  if (typeof fetch !== 'function') {
+    throw new Error('Global fetch is required for registry preflight; run this script with Node.js 18 or newer');
+  }
   const userAgent = 'rust-ml-runtime-release (github.com/rkendel1/rust-ml-runtime)';
   const exists = async (url) => {
     const response = await fetch(url, { headers: { 'user-agent': userAgent } });
