@@ -17,7 +17,7 @@ class NativeLoadError extends Error {
       `Could not load ${diagnostics.packageName ?? 'native binding'} for ${diagnostics.platform}`
         + (diagnostics.error ? `: ${diagnostics.error.message}` : ''),
       {
-          cause: diagnostics.error,
+        cause: diagnostics.error,
       },
     );
     this.name = 'NativeLoadError';
