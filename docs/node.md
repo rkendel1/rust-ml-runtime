@@ -11,6 +11,22 @@ does not run Cargo during installation and does not contain every platform's
 binary. Install the model once with the separately shipped CLI before loading
 it from Node:
 
+Production npm installs must retain optional dependencies:
+
+```sh
+npm ci --include=optional
+```
+
+Consumers should not install `@rust-ml-runtime/node-linux-x64-gnu` (or another
+platform package) directly. The runtime resolves the matching package and
+reports package, native artifact, and load failures through `diagnoseNative()`:
+
+```js
+const { diagnoseNative, LocalML } = require("@rust-ml-runtime/node");
+console.log(diagnoseNative());
+if (!LocalML.selfTest().available) throw new Error("local inference is unavailable");
+```
+
 ```sh
 ml-runtime model install laya
 ml-runtime model doctor laya

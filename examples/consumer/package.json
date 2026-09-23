@@ -8,6 +8,6 @@
     "measure": "node measure.cjs"
   },
   "dependencies": {
-    "@rust-ml-runtime/node": "0.1.0"
+    "@rust-ml-runtime/node": "0.2.0"
   }
 }

@@ -1,9 +1,12 @@
-# rust-ml-runtime 0.1.0
+# rust-ml-runtime 0.2.0
 
 A native local ML runtime for applications without Python.
 
 ## Included
 
+- Deterministic Node native binding resolution with structured diagnostics
+- Published npm artifact validation and Linux optional-dependency install checks
+- Native runtime self-test support through `@rust-ml-runtime/node`
 - Native Rust CLI releases for macOS, Linux, and Windows
 - Rust library distribution through `rust-ml-runtime = "0.1"` on crates.io
 - Explicit model installation, verification, diagnosis, and removal

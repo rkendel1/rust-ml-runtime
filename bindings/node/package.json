@@ -1,6 +1,6 @@
 {
   "name": "@rust-ml-runtime/node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "description": "Python-free Node-API bindings for the native Rust ML runtime",
   "type": "commonjs",
@@ -14,11 +14,11 @@
     "build": "node build.mjs"
   },
   "optionalDependencies": {
-    "@rust-ml-runtime/node-darwin-arm64": "0.1.0",
-    "@rust-ml-runtime/node-darwin-x64": "0.1.0",
-    "@rust-ml-runtime/node-linux-arm64-gnu": "0.1.0",
-    "@rust-ml-runtime/node-linux-x64-gnu": "0.1.0",
-    "@rust-ml-runtime/node-win32-x64-msvc": "0.1.0"
+    "@rust-ml-runtime/node-darwin-arm64": "0.2.0",
+    "@rust-ml-runtime/node-darwin-x64": "0.2.0",
+    "@rust-ml-runtime/node-linux-arm64-gnu": "0.2.0",
+    "@rust-ml-runtime/node-linux-x64-gnu": "0.2.0",
+    "@rust-ml-runtime/node-win32-x64-msvc": "0.2.0"
   },
   "engines": {
     "node": ">=20.17"
