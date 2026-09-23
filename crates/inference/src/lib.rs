@@ -213,6 +213,182 @@ pub struct DecisionRequest {
     pub decisions: Vec<DecisionQuestion>,
 }
 
+/// Backend/model execution facts used by the structured-decision planner.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionModelCapabilities {
+    pub backend: String,
+    pub device: DeviceKind,
+    pub model_architecture: ModelArchitecture,
+    pub supports_batching: bool,
+    pub max_batch_size: Option<usize>,
+    pub batch_size: Option<usize>,
+    pub supports_async: bool,
+    /// True only when an in-flight native operation can actually be interrupted.
+    pub supports_cancellation: bool,
+    pub supports_parallel_execution: bool,
+    pub recommended_parallelism: Option<usize>,
+    pub supports_structured_decisions: bool,
+}
+
+impl DecisionModelCapabilities {
+    pub fn conservative(backend: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            device: DeviceKind::Unknown,
+            model_architecture: ModelArchitecture::StructuredDecision,
+            supports_batching: false,
+            max_batch_size: Some(1),
+            batch_size: Some(1),
+            supports_async: false,
+            supports_cancellation: false,
+            supports_parallel_execution: false,
+            recommended_parallelism: Some(1),
+            supports_structured_decisions: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Cpu,
+    Gpu,
+    NeuralEngine,
+    WebAssembly,
+    Unknown,
+    Other(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelArchitecture {
+    StructuredDecision,
+    Tensor,
+    Generative,
+    Other(String),
+}
+
+/// Application constraints. These bound execution without prescribing a backend strategy.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionExecutionPolicy {
+    #[serde(default)]
+    pub latency_target: Option<Duration>,
+    #[serde(default)]
+    pub max_parallelism: Option<usize>,
+    #[serde(default)]
+    pub max_batch_size: Option<usize>,
+    #[serde(default = "default_true")]
+    pub allow_parallel: bool,
+    #[serde(default = "default_true")]
+    pub allow_batching: bool,
+    #[serde(default = "default_true")]
+    pub allow_selective_execution: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DecisionExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            latency_target: None,
+            max_parallelism: None,
+            max_batch_size: None,
+            allow_parallel: true,
+            allow_batching: true,
+            allow_selective_execution: true,
+        }
+    }
+}
+
+/// One decision node and the predicates that control whether it is required.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionNode {
+    pub question: DecisionQuestion,
+    #[serde(default)]
+    pub dependencies: Vec<DecisionDependency>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionDependency {
+    pub decision: String,
+    #[serde(default)]
+    pub condition: DecisionDependencyCondition,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum DecisionDependencyCondition {
+    #[default]
+    Completed,
+    ChoiceEquals(String),
+    NoulEquals(bool),
+    ScoreAtLeast(f64),
+    ScoreAtMost(f64),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionGraphRequest {
+    pub state: Value,
+    pub nodes: Vec<DecisionNode>,
+    #[serde(default)]
+    pub policy: DecisionExecutionPolicy,
+}
+
+impl DecisionGraphRequest {
+    pub fn independent(request: DecisionRequest, policy: DecisionExecutionPolicy) -> Self {
+        Self {
+            state: request.state,
+            nodes: request
+                .decisions
+                .into_iter()
+                .map(|question| DecisionNode {
+                    question,
+                    dependencies: Vec::new(),
+                })
+                .collect(),
+            policy,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecisionExecutionStrategy {
+    Single,
+    Sequential,
+    Parallel { concurrency: usize },
+    Batched { batch_size: usize },
+    Selective,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionPlanStage {
+    pub nodes: Vec<String>,
+    pub batches: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionExecutionPlan {
+    pub strategy: DecisionExecutionStrategy,
+    pub reason: String,
+    pub stages: Vec<DecisionPlanStage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionExecutionDiagnostics {
+    pub capabilities: DecisionModelCapabilities,
+    pub strategy: DecisionExecutionStrategy,
+    pub reason: String,
+    pub requested_nodes: usize,
+    pub executed_nodes: usize,
+    pub skipped_nodes: usize,
+    pub batches: Vec<Vec<String>>,
+    pub max_concurrency: usize,
+    pub cancelled: bool,
+}
+
 impl DecisionRequest {
     pub fn new(state: impl Into<Value>, decisions: Vec<DecisionQuestion>) -> Self {
         Self {
@@ -261,6 +437,23 @@ pub struct DecisionResult {
     pub decisions: Vec<TypedDecision>,
     pub execution: DecisionExecution,
     pub provenance: DecisionProvenance,
+}
+
+/// Result returned by the capability-aware executor. Flattening preserves the
+/// existing JSON shape while keeping `DecisionResult` source-compatible.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlannedDecisionResult {
+    #[serde(flatten)]
+    pub result: DecisionResult,
+    pub planning: DecisionExecutionDiagnostics,
+}
+
+impl std::ops::Deref for PlannedDecisionResult {
+    type Target = DecisionResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

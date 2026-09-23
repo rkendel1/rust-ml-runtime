@@ -5,12 +5,33 @@ and Windows x64. The same matrix builds one npm native package per platform;
 the platform-neutral `@rust-ml-runtime/node` package selects one through npm
 optional dependencies.
 
+## Linux Node ABI contract
+
+`@rust-ml-runtime/node-linux-x64-gnu` supports Linux x86_64 systems with
+glibc 2.36 or newer. This is a release invariant, not a description of the
+GitHub-hosted runner used to orchestrate a release.
+
+The x64 Linux addon is compiled in `bindings/node/Dockerfile.bookworm`, whose
+Bookworm environment is required to report `glibc 2.36`. Its Cargo target
+directory is isolated from host builds so a newer host object cannot be reused.
+The final `ml_runtime_node.node` and its resolved ELF dependency graph are
+checked with `readelf`/`ldd`; any required `GLIBC_*` version newer than 2.36
+fails the build.
+
+Release verification repeats the direct ELF check against the binary extracted
+from the exact npm tarball, then installs the wrapper and Linux platform
+tarballs with optional dependencies enabled in a clean `node:22-bookworm-slim`
+container. That container resolves and loads the platform addon and executes a
+minimal in-process CPU inference. Publication depends on this gate, and the
+publish script checks the same Linux tarball again immediately before registry
+preflight.
+
 The release also packages `rust-ml-runtime` and its required implementation
 crates for crates.io. Rust applications install only the public crate:
 
 ```toml
 [dependencies]
-rust-ml-runtime = "0.1"
+rust-ml-runtime = "0.2.3"
 ```
 
 CLI, Node, benchmark, server-integration, and placeholder backend workspace

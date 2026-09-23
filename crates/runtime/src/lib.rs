@@ -27,6 +27,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 
 mod capability;
+mod decision;
 
 pub use capability::{
     AvailabilityState, BuiltinCapabilityProvider, Capability, CapabilityAuthorizer,
@@ -36,6 +37,7 @@ pub use capability::{
     ManifestCapabilityProvider, PackageCapability, PackageManifest, ProviderDescriptor,
     ProviderManifest, ResolutionCandidate, ResolutionConstraints,
 };
+pub use decision::DecisionPlanner;
 
 pub use ml_runtime_backend;
 pub use ml_runtime_backend::{DecisionModel, DecisionModelProvider};
@@ -43,10 +45,14 @@ pub use ml_runtime_common;
 pub use ml_runtime_common::{CancellationToken, RuntimeError, RuntimeResult};
 pub use ml_runtime_inference;
 pub use ml_runtime_inference::{
-    DecisionExecution, DecisionOption, DecisionProvenance, DecisionQuestion, DecisionRequest,
-    DecisionResult, DecisionType, DecisionValue, ExecutionMetadata, ExecutionPolicy,
+    DecisionDependency, DecisionDependencyCondition, DecisionExecution,
+    DecisionExecutionDiagnostics, DecisionExecutionPlan, DecisionExecutionPolicy,
+    DecisionExecutionStrategy, DecisionGraphRequest, DecisionModelCapabilities, DecisionNode,
+    DecisionOption, DecisionPlanStage, DecisionProvenance, DecisionQuestion, DecisionRequest,
+    DecisionResult, DecisionType, DecisionValue, DeviceKind, ExecutionMetadata, ExecutionPolicy,
     InferenceOptions, InferenceRequest, InferenceResult, InferenceStreamEvent, Input,
-    ModelDescription, ModelIdentity, Output, Tensor, TypedDecision,
+    ModelArchitecture, ModelDescription, ModelIdentity, Output, PlannedDecisionResult, Tensor,
+    TypedDecision,
 };
 pub use ml_runtime_model;
 pub use ml_runtime_model::{
@@ -562,6 +568,9 @@ impl Default for RuntimeBuilder {
         builder
             .backends
             .insert("onnx".to_owned(), Arc::new(OnnxBackend));
+        builder
+            .decision_providers
+            .insert("onnx".to_owned(), Arc::new(OnnxBackend));
         #[cfg(feature = "coreml")]
         builder.decision_providers.insert(
             "coreml".to_owned(),
@@ -802,6 +811,49 @@ impl Runtime {
         }
     }
 
+    /// Returns model/backend execution facts without requiring applications to
+    /// inspect artifact layouts or backend names.
+    pub fn decision_capabilities(&self, model: &dyn DecisionModel) -> DecisionModelCapabilities {
+        model.capabilities()
+    }
+
+    /// Builds the deterministic execution plan for a loaded model and graph.
+    pub fn explain_decision(
+        &self,
+        model: &dyn DecisionModel,
+        request: &DecisionGraphRequest,
+    ) -> RuntimeResult<DecisionExecutionPlan> {
+        DecisionPlanner.plan(request, &model.capabilities())
+    }
+
+    /// Executes a graph asynchronously. Synchronous native model calls are
+    /// moved off the caller's async executor thread.
+    pub async fn execute_decision_graph(
+        &self,
+        model: Arc<dyn DecisionModel>,
+        request: DecisionGraphRequest,
+        cancellation: Option<CancellationToken>,
+    ) -> RuntimeResult<PlannedDecisionResult> {
+        decision::execute_graph(model, request, cancellation).await
+    }
+
+    /// Compatibility-friendly async execution for an ordinary independent
+    /// `DecisionRequest`.
+    pub async fn decide_async(
+        &self,
+        model: Arc<dyn DecisionModel>,
+        request: DecisionRequest,
+        policy: DecisionExecutionPolicy,
+        cancellation: Option<CancellationToken>,
+    ) -> RuntimeResult<PlannedDecisionResult> {
+        self.execute_decision_graph(
+            model,
+            DecisionGraphRequest::independent(request, policy),
+            cancellation,
+        )
+        .await
+    }
+
     fn registered_model_root(&self) -> RuntimeResult<&Path> {
         self.model_root
             .as_deref()
@@ -841,7 +893,7 @@ impl Runtime {
                                 && manifest
                                     .compiled_artifact
                                     .as_ref()
-                                    .is_some_and(|artifact| artifact.path.is_dir()) =>
+                                    .is_some_and(|artifact| artifact.path.exists()) =>
                         {
                             (InstalledModelStatus::Ready, true)
                         }
@@ -901,40 +953,61 @@ impl Runtime {
             .await
             .map_err(|error| RuntimeError::execution("model install", error.to_string()))?;
 
-        #[cfg(feature = "coreml")]
-        let prepared = if model.backend == "coreml" {
-            if installed.already_installed && !replace {
-                ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(
-                    &installed.package_path,
+        let (prepared_path, model_identity, prepared_identity) = match model.backend.as_str() {
+            "onnx" => {
+                let identity = OnnxBackend::validate_laya(&installed.package_path)?;
+                (
+                    installed.package_path.join(&model.artifact_path),
+                    identity.clone(),
+                    identity,
                 )
-                .or_else(|_| {
-                    ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(&installed.package_path)
-                })?
-            } else {
-                ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(&installed.package_path)?
             }
-        } else {
-            return Err(RuntimeError::UnsupportedModel {
-                model: model.name.clone(),
-                backend: model.backend.clone(),
-                reason: "registered backend has no preparation lifecycle".to_owned(),
-            });
+            "coreml" => {
+                #[cfg(feature = "coreml")]
+                {
+                    let prepared = if installed.already_installed && !replace {
+                        ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(
+                            &installed.package_path,
+                        )
+                        .or_else(|_| {
+                            ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(
+                                &installed.package_path,
+                            )
+                        })?
+                    } else {
+                        ml_runtime_coreml_backend::CoreMlBackend::prepare_laya(
+                            &installed.package_path,
+                        )?
+                    };
+                    (
+                        prepared.path,
+                        prepared.model_identity,
+                        prepared.compiled_identity,
+                    )
+                }
+                #[cfg(not(feature = "coreml"))]
+                {
+                    return Err(RuntimeError::backend_unavailable(
+                        "coreml",
+                        "this runtime was built without Core ML support",
+                    ));
+                }
+            }
+            backend => {
+                return Err(RuntimeError::UnsupportedModel {
+                    model: model.name.clone(),
+                    backend: backend.to_owned(),
+                    reason: "registered backend has no preparation lifecycle".to_owned(),
+                })
+            }
         };
-        #[cfg(not(feature = "coreml"))]
-        let _ = (&started, &installed);
-        #[cfg(not(feature = "coreml"))]
-        return Err(RuntimeError::backend_unavailable(
-            "coreml",
-            "this runtime was built without Core ML support",
-        ));
 
-        #[cfg(feature = "coreml")]
         {
             let manifest = InstallationManifest {
                 schema_version: 1,
                 model: model.name.clone(),
                 model_revision: model.revision.clone(),
-                model_checksum: prepared.model_identity,
+                model_checksum: model_identity,
                 runtime_version: VERSION.to_owned(),
                 runtime_requirement: model.runtime_requirement.clone(),
                 backend: model.backend.clone(),
@@ -946,8 +1019,8 @@ impl Runtime {
                     .as_secs(),
                 compiled_status: CompiledStatus::Ready,
                 compiled_artifact: Some(CompiledArtifactManifest {
-                    path: prepared.path,
-                    identity: prepared.compiled_identity,
+                    path: prepared_path,
+                    identity: prepared_identity,
                 }),
             };
             manifest
@@ -1009,7 +1082,10 @@ impl Runtime {
                 diagnostics.push(ModelDiagnostic {
                     check: "artifact".to_owned(),
                     ok: true,
-                    message: "registered files, tokenizer, Core ML package, and SHA-256 checksums are valid".to_owned(),
+                    message: format!(
+                        "registered files, {} artifact, tokenizer, and SHA-256 checksums are valid",
+                        model.backend
+                    ),
                 });
                 true
             }
@@ -1050,7 +1126,7 @@ impl Runtime {
                 )
             },
         });
-        let supported = model.backend != "coreml" || cfg!(target_os = "macos");
+        let supported = model.supports_platform(std::env::consts::OS, std::env::consts::ARCH);
         diagnostics.push(ModelDiagnostic {
             check: "platform".to_owned(),
             ok: supported,
@@ -1060,17 +1136,36 @@ impl Runtime {
                 "Core ML is only supported on macOS".to_owned()
             },
         });
-        #[cfg(feature = "coreml")]
         let compiled_valid = supported
             && compatible
-            && ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(&package).is_ok();
-        #[cfg(not(feature = "coreml"))]
-        let compiled_valid = false;
+            && match model.backend.as_str() {
+                "onnx" => OnnxBackend::validate_laya(&package).is_ok_and(|identity| {
+                    manifest.as_ref().is_some_and(|manifest| {
+                        manifest.model_checksum == identity
+                            && manifest.compiled_artifact.as_ref().is_some_and(|artifact| {
+                                artifact.path == package.join(&model.artifact_path)
+                                    && artifact.identity == identity
+                            })
+                    })
+                }),
+                "coreml" => {
+                    #[cfg(feature = "coreml")]
+                    {
+                        ml_runtime_coreml_backend::CoreMlBackend::validate_prepared_laya(&package)
+                            .is_ok()
+                    }
+                    #[cfg(not(feature = "coreml"))]
+                    {
+                        false
+                    }
+                }
+                _ => false,
+            };
         diagnostics.push(ModelDiagnostic {
             check: "compiled_artifact".to_owned(),
             ok: compiled_valid,
             message: if compiled_valid {
-                "compiled Core ML artifact identity and schema are valid".to_owned()
+                format!("prepared {} artifact identity and schema are valid", model.backend)
             } else {
                 format!(
                     "compiled artifact is missing or invalid; run `ml-runtime model install {} --replace`",
@@ -1160,6 +1255,14 @@ impl Runtime {
                 model: format!("{name}; install it with `ml-runtime model install {name}`"),
             });
         }
+        installer.validate(&registered, &package).map_err(|error| {
+            RuntimeError::ModelIntegrity {
+                model: name.to_owned(),
+                reason: format!(
+                    "{error}; reinstall with `ml-runtime model install {name} --replace`"
+                ),
+            }
+        })?;
         let manifest =
             InstallationManifest::read(&package).map_err(|error| RuntimeError::ModelIntegrity {
                 model: name.to_owned(),
@@ -1176,10 +1279,12 @@ impl Runtime {
             && manifest.os == std::env::consts::OS
             && manifest.architecture == std::env::consts::ARCH
             && manifest.compiled_status == CompiledStatus::Ready
-            && manifest
-                .compiled_artifact
-                .as_ref()
-                .is_some_and(|artifact| artifact.path.is_dir());
+            && manifest.compiled_artifact.as_ref().is_some_and(|artifact| {
+                artifact.path.exists()
+                    && (registered.backend != "onnx"
+                        || (artifact.path == package.join(&registered.artifact_path)
+                            && artifact.identity == manifest.model_checksum))
+            });
         if !compatible {
             return Err(RuntimeError::ModelUnavailable {
                 model: name.to_owned(),

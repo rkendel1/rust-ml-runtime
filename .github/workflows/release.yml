@@ -9,7 +9,7 @@ on:
       version:
         description: Release candidate version to build without publishing
         required: true
-        default: 0.2.0
+        default: 0.2.1
       publish:
         description: Publish this manually triggered release
         required: true
@@ -33,7 +33,7 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: candidate="${RELEASE_VERSION##*/}"; node tools/check-package-versions.mjs "${candidate#v}"
       - run: node tools/check-release-boundary.mjs
-      - run: node --test bindings/node/test/loader.test.cjs tools/publish-packages.test.mjs
+      - run: node --test bindings/node/test/loader.test.cjs tools/check-glibc-compat.test.mjs tools/publish-packages.test.mjs
       - run: npm pack --dry-run
         working-directory: bindings/node
 
@@ -78,7 +78,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }} -p ml-runtime-cli -p ml-runtime-node
+      - name: Build release binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          NPM_PLATFORM: ${{ matrix.npm_platform }}
+        run: |
+          set -euo pipefail
+          if [[ "$NPM_PLATFORM" == "linux-x64-gnu" ]]; then
+            cargo build --release --target "$TARGET" -p ml-runtime-cli
+            docker build -f bindings/node/Dockerfile.bookworm -t rust-ml-node-bookworm .
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/workspace" \
+              -e CARGO_TARGET_DIR=/workspace/target/bookworm \
+              rust-ml-node-bookworm \
+              bash -ceu 'cargo build --locked --release --target x86_64-unknown-linux-gnu -p ml-runtime-node; node tools/check-glibc-compat.mjs --dependencies target/bookworm/x86_64-unknown-linux-gnu/release/libml_runtime_node.so'
+          else
+            cargo build --release --target "$TARGET" -p ml-runtime-cli -p ml-runtime-node
+          fi
       - name: Package and smoke test
         shell: bash
         env:
@@ -104,9 +121,9 @@ jobs:
           empty_path="$(mktemp -d)"
           env -i HOME="$clean_home" PATH="$empty_path" "$(pwd)/${dir}/${exe}" --version
           env -i HOME="$clean_home" PATH="$empty_path" "$(pwd)/${dir}/${exe}" model list
-          if [[ "$PLATFORM" != macos-* ]]; then
+          if [[ "$PLATFORM" == windows-* ]]; then
             if env -i HOME="$clean_home" PATH="$empty_path" "$(pwd)/${dir}/${exe}" model install laya; then
-              echo "Laya unexpectedly installed without Core ML" >&2
+              echo "Laya unexpectedly installed on an unsupported platform" >&2
               exit 1
             fi
           fi
@@ -116,8 +133,15 @@ jobs:
             shasum -a 256 "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
           fi
           npm_dir="bindings/node/npm/${NPM_PLATFORM}"
-          cp "target/${TARGET}/release/${library}" "${npm_dir}/ml_runtime_node.node"
+          node_library="target/${TARGET}/release/${library}"
+          if [[ "$NPM_PLATFORM" == "linux-x64-gnu" ]]; then
+            node_library="target/bookworm/${TARGET}/release/${library}"
+          fi
+          cp "$node_library" "${npm_dir}/ml_runtime_node.node"
           (cd "$npm_dir" && npm pack --pack-destination "$GITHUB_WORKSPACE")
+          if [[ "$NPM_PLATFORM" == "linux-x64-gnu" ]]; then
+            node tools/check-glibc-compat.mjs "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz"
+          fi
           if [[ "$NPM_PLATFORM" == darwin-arm64 ]]; then
             (cd bindings/node && npm pack --pack-destination "$GITHUB_WORKSPACE")
           fi
@@ -147,6 +171,9 @@ jobs:
           done < <(find artifacts -name '*.sha256' -type f | sort)
           node tools/release-manifest.mjs "$version" artifacts release-manifest.json
           node tools/validate-node-packages.mjs artifacts "$version"
+          linux_node_package="$(find artifacts/linux-x86_64 -name "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz" -print -quit)"
+          test -n "$linux_node_package"
+          node tools/check-glibc-compat.mjs "$linux_node_package"
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -print0 \
             | sort -z | xargs -0 sha256sum | sed 's#  artifacts/[^/]*/#  #' > SHA256SUMS
       - name: Smoke test the verified installer
@@ -182,7 +209,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
-      - name: Install the published package shape with optional dependencies
+      - name: Install packed packages and run inference in clean Bookworm
         shell: bash
         run: |
           set -euo pipefail
@@ -194,18 +221,69 @@ jobs:
           test -n "$native_package"
           test -f "$root_package"
           test -f "$native_package"
-          project="$(mktemp -d)"
-          cd "$project"
-          npm init -y >/dev/null
-          npm install --offline --include=optional --ignore-scripts "$root_package" "$native_package"
-          node - <<'NODE'
-          const runtime = require('@rust-ml-runtime/node');
-          const diagnostics = runtime.diagnoseNative();
-          if (!diagnostics.available || diagnostics.packageName !== '@rust-ml-runtime/node-linux-x64-gnu') {
-            console.error(diagnostics);
-            process.exit(1);
-          }
-          NODE
+          docker build -f bindings/node/Dockerfile.bookworm -t rust-ml-node-bookworm .
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            rust-ml-node-bookworm \
+            bash -ceu '
+              project="$(mktemp -d)"
+              cd "$project"
+              npm init -y >/dev/null
+              npm install --offline --include=optional --ignore-scripts "$1" "$2"
+              native_binary="$(node -p "require.resolve(\"@rust-ml-runtime/node-linux-x64-gnu\")")"
+              test -f "$native_binary"
+              node /workspace/tools/check-glibc-compat.mjs --dependencies "$native_binary"
+              node -e "(async () => { const runtime = require(\"@rust-ml-runtime/node\"); const diagnostics = runtime.diagnoseNative(); if (!diagnostics.available || diagnostics.packageName !== \"@rust-ml-runtime/node-linux-x64-gnu\") throw new Error(JSON.stringify(diagnostics)); const result = JSON.parse(await runtime.runtimeSmokeTest()); if (result.output?.Text !== \"bookworm-smoke\" && result.output?.text !== \"bookworm-smoke\") throw new Error(JSON.stringify(result)); if (result.metadata?.backend !== \"cpu\") throw new Error(JSON.stringify(result)); })().catch(error => { console.error(error); process.exit(1); })"
+            ' bash "/workspace/${root_package#$GITHUB_WORKSPACE/}" "/workspace/${native_package#$GITHUB_WORKSPACE/}"
+
+  verify-laya-linux:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Install the pinned model and run real Node inference in glibc 2.41
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION##*/}"
+          version="${version#v}"
+          cli_archive="$(find "$GITHUB_WORKSPACE/artifacts/linux-x86_64" -name "ml-runtime-v${version}-linux-x86_64.tar.gz" -print -quit)"
+          root_package="$(find "$GITHUB_WORKSPACE/artifacts/macos-aarch64" -name "rust-ml-runtime-node-${version}.tgz" -print -quit)"
+          native_package="$(find "$GITHUB_WORKSPACE/artifacts/linux-x86_64" -name "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz" -print -quit)"
+          test -f "$cli_archive"
+          test -f "$root_package"
+          test -f "$native_package"
+          docker build -f bindings/node/Dockerfile.trixie -t rust-ml-laya-trixie .
+          docker image inspect rust-ml-laya-trixie --format '{{json .RepoDigests}} {{.Id}}'
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            rust-ml-laya-trixie \
+            bash -ceu '
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.41"
+              node --version
+              npm --version
+              ! command -v python
+              ! command -v python3
+              root="$(mktemp -d)"
+              project="$(mktemp -d)"
+              release="$(mktemp -d)"
+              tar -xzf "$1" -C "$release"
+              runtime="$(find "$release" -type f -name ml-runtime -print -quit)"
+              test -x "$runtime"
+              ML_RUNTIME_MODEL_DIR="$root/models" "$runtime" model install laya
+              ML_RUNTIME_MODEL_DIR="$root/models" "$runtime" model doctor laya
+              cd "$project"
+              npm init -y >/dev/null
+              npm install --offline --include=optional --ignore-scripts "$2" "$3"
+              env -i \
+                HOME="$root" \
+                PATH="/usr/local/bin:/bin" \
+                NODE_PATH="$project/node_modules" \
+                ML_RUNTIME_MODEL_DIR="$root/models" \
+                /usr/local/bin/npm --prefix /workspace run smoke:laya:linux
+            ' bash "/workspace/${cli_archive#$GITHUB_WORKSPACE/}" "/workspace/${root_package#$GITHUB_WORKSPACE/}" "/workspace/${native_package#$GITHUB_WORKSPACE/}"
 
   verify-laya-release:
     needs: [package, metadata]
@@ -265,7 +343,7 @@ jobs:
           path: release-measurements.json
 
   publish:
-    needs: [cargo-package, package, metadata, verify-laya-release]
+    needs: [cargo-package, package, metadata, verify-node-linux, verify-laya-linux, verify-laya-release]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     env:

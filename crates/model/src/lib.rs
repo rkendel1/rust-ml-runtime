@@ -1130,6 +1130,10 @@ pub struct RegisteredModel {
     pub backend: String,
     pub runtime_requirement: String,
     pub format: ModelFormat,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub architectures: Vec<String>,
     pub artifact_path: String,
     pub files: Vec<RegisteredModelFile>,
 }
@@ -1214,20 +1218,60 @@ pub struct BuiltinModelRegistry;
 
 impl BuiltinModelRegistry {
     pub fn list(&self) -> Vec<RegisteredModel> {
-        vec![laya_registration()]
+        self.all()
+            .into_iter()
+            .filter(|model| model.supports_platform(std::env::consts::OS, std::env::consts::ARCH))
+            .collect()
     }
 
     pub fn resolve(&self, name: &str) -> Result<RegisteredModel, AcquisitionError> {
-        self.list()
+        self.resolve_for(name, std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    pub fn resolve_for(
+        &self,
+        name: &str,
+        platform: &str,
+        architecture: &str,
+    ) -> Result<RegisteredModel, AcquisitionError> {
+        let registrations: Vec<_> = self
+            .all()
             .into_iter()
-            .find(|model| model.name == name)
-            .ok_or_else(|| {
-                AcquisitionError::InvalidRequest(format!("unknown registered model {name:?}"))
-            })
+            .filter(|model| model.name == name)
+            .collect();
+        if registrations.is_empty() {
+            return Err(AcquisitionError::InvalidRequest(format!(
+                "unknown registered model {name:?}"
+            )));
+        }
+        registrations
+            .iter()
+            .find(|model| model.supports_platform(platform, architecture))
+            .cloned()
+            .ok_or_else(|| AcquisitionError::InvalidRequest(format!(
+                "registered model {name:?} has no backend for platform {platform}/{architecture}; available variants: {}",
+                registrations
+                    .iter()
+                    .map(|model| format!("{} ({}/{})", model.backend, model.platforms.join("|"), model.architectures.join("|")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+    }
+
+    fn all(&self) -> Vec<RegisteredModel> {
+        vec![laya_coreml_registration(), laya_onnx_registration()]
     }
 }
 
-fn laya_registration() -> RegisteredModel {
+impl RegisteredModel {
+    pub fn supports_platform(&self, platform: &str, architecture: &str) -> bool {
+        (self.platforms.is_empty() || self.platforms.iter().any(|value| value == platform))
+            && (self.architectures.is_empty()
+                || self.architectures.iter().any(|value| value == architecture))
+    }
+}
+
+fn laya_coreml_registration() -> RegisteredModel {
     const REVISION: &str = "fff78b2d9750c6b748fe8c90fcbf8bed0a1522a9";
     let files = [
         (
@@ -1280,7 +1324,53 @@ fn laya_registration() -> RegisteredModel {
         backend: "coreml".to_owned(),
         runtime_requirement: ">=0.1.0".to_owned(),
         format: ModelFormat::CoreMl,
+        platforms: vec!["macos".to_owned()],
+        architectures: vec!["aarch64".to_owned()],
         artifact_path: "model.mlpackage".to_owned(),
+        files,
+    }
+}
+
+fn laya_onnx_registration() -> RegisteredModel {
+    const REVISION: &str = "68f27dfe5a27a54fb2b1fefc432f43f972e90868";
+    let files = [
+        (
+            "laya.onnx",
+            "a874eb254b58b0fcb1e7ad56fbb188c29d64e08c9a46b689433e1f52c66dba1e",
+        ),
+        (
+            "laya.onnx.data",
+            "487746363a8da57bcadb4345352997d22a0fb90d70aa22c6856668d023242aba",
+        ),
+        (
+            "laya_config.json",
+            "5049005dc6ae3ca5e82cc7d85c421357d5c543817300c8e8c5281ddbc69bb561",
+        ),
+        (
+            "tokenizer/tokenizer.json",
+            "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        ),
+        (
+            "tokenizer/tokenizer_config.json",
+            "50044de60daaa73df97d262e15a40d4faf0160e7d742df64b377877a1320dd12",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, sha256)| RegisteredModelFile {
+        path: path.to_owned(),
+        sha256: sha256.to_owned(),
+    })
+    .collect();
+    RegisteredModel {
+        name: "laya".to_owned(),
+        revision: REVISION.to_owned(),
+        source: format!("https://huggingface.co/receptron/laya-onnx/resolve/{REVISION}"),
+        backend: "onnx".to_owned(),
+        runtime_requirement: ">=0.2.2".to_owned(),
+        format: ModelFormat::Onnx,
+        platforms: vec!["linux".to_owned()],
+        architectures: vec!["x86_64".to_owned(), "aarch64".to_owned()],
+        artifact_path: "laya.onnx".to_owned(),
         files,
     }
 }
@@ -1345,6 +1435,7 @@ impl RegisteredModelInstaller {
         model: &RegisteredModel,
         package: &Path,
     ) -> Result<(), AcquisitionError> {
+        validate_registration(model)?;
         let manifest =
             ModelPackage::open(package).map_err(|reason| AcquisitionError::InvalidPackage {
                 path: package.to_path_buf(),
@@ -1367,6 +1458,18 @@ impl RegisteredModelInstaller {
                     model.artifact_path, manifest.manifest.artifact.path
                 ),
             });
+        }
+        for (key, expected) in [
+            ("backend", model.backend.as_str()),
+            ("platforms", model.platforms.join(",").as_str()),
+            ("architectures", model.architectures.join(",").as_str()),
+        ] {
+            if manifest.manifest.metadata.get(key).map(String::as_str) != Some(expected) {
+                return Err(AcquisitionError::InvalidPackage {
+                    path: package.join("manifest.json"),
+                    reason: format!("registered metadata {key:?} is missing or incorrect"),
+                });
+            }
         }
         if !runtime_requirement_satisfied(&model.runtime_requirement, env!("CARGO_PKG_VERSION")) {
             return Err(AcquisitionError::InvalidPackage {
@@ -1398,6 +1501,16 @@ impl RegisteredModelInstaller {
         mode: InstallMode,
         cancellation: Option<&CancellationToken>,
     ) -> Result<RegisteredInstallResult, AcquisitionError> {
+        validate_registration(model)?;
+        if !model.supports_platform(std::env::consts::OS, std::env::consts::ARCH) {
+            return Err(AcquisitionError::InvalidRequest(format!(
+                "model {} backend {} does not support {}/{}",
+                model.name,
+                model.backend,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )));
+        }
         let final_path = self.installed_path(model);
         if final_path.exists() && mode == InstallMode::KeepExisting {
             self.validate(model, &final_path)?;
@@ -1546,6 +1659,44 @@ impl RegisteredModelInstaller {
     }
 }
 
+fn validate_registration(model: &RegisteredModel) -> Result<(), AcquisitionError> {
+    if model.name.is_empty()
+        || model.revision.is_empty()
+        || model.source.is_empty()
+        || model.backend.is_empty()
+        || model.artifact_path.is_empty()
+        || model.platforms.iter().any(String::is_empty)
+        || model.architectures.iter().any(String::is_empty)
+    {
+        return Err(AcquisitionError::InvalidRequest(
+            "registered model metadata is incomplete".to_owned(),
+        ));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for file in &model.files {
+        if !paths.insert(&file.path)
+            || file.sha256.len() != 64
+            || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AcquisitionError::InvalidRequest(format!(
+                "registered file {:?} has a duplicate path or invalid SHA-256",
+                file.path
+            )));
+        }
+    }
+    if !paths.contains(&model.artifact_path)
+        && !paths
+            .iter()
+            .any(|path| path.starts_with(&format!("{}/", model.artifact_path)))
+    {
+        return Err(AcquisitionError::InvalidRequest(format!(
+            "registered artifact {:?} has no checksummed file entry",
+            model.artifact_path
+        )));
+    }
+    Ok(())
+}
+
 fn safe_registered_path(root: &Path, relative: &str) -> Result<PathBuf, AcquisitionError> {
     let relative = Path::new(relative);
     if relative.is_absolute()
@@ -1596,6 +1747,8 @@ fn write_registered_manifest(
         },
         metadata: BTreeMap::from([
             ("backend".to_owned(), model.backend.clone()),
+            ("platforms".to_owned(), model.platforms.join(",")),
+            ("architectures".to_owned(), model.architectures.join(",")),
             ("source".to_owned(), model.source.clone()),
             ("registry_revision".to_owned(), model.revision.clone()),
             (
@@ -1702,15 +1855,29 @@ mod tests {
 
     #[test]
     fn builtin_registry_pins_laya_distribution_metadata() {
-        let laya = BuiltinModelRegistry.resolve("laya").unwrap();
-        assert_eq!(laya.backend, "coreml");
-        assert_eq!(laya.format, ModelFormat::CoreMl);
-        assert_eq!(laya.artifact_path, "model.mlpackage");
-        assert!(laya.source.contains(&laya.revision));
-        assert!(laya
+        let coreml = BuiltinModelRegistry
+            .resolve_for("laya", "macos", "aarch64")
+            .unwrap();
+        assert_eq!(coreml.backend, "coreml");
+        assert_eq!(coreml.format, ModelFormat::CoreMl);
+        assert_eq!(coreml.artifact_path, "model.mlpackage");
+        assert!(coreml.source.contains(&coreml.revision));
+        assert!(coreml
             .files
             .iter()
             .any(|file| file.path.ends_with("weights/weight.bin")));
+        let onnx = BuiltinModelRegistry
+            .resolve_for("laya", "linux", "x86_64")
+            .unwrap();
+        assert_eq!(onnx.backend, "onnx");
+        assert_eq!(onnx.format, ModelFormat::Onnx);
+        assert_eq!(onnx.artifact_path, "laya.onnx");
+        assert!(onnx.files.iter().all(|file| file.sha256.len() == 64));
+        assert!(BuiltinModelRegistry
+            .resolve_for("laya", "windows", "x86_64")
+            .unwrap_err()
+            .to_string()
+            .contains("no backend for platform"));
         assert!(BuiltinModelRegistry.resolve("missing").is_err());
     }
 
@@ -1763,6 +1930,8 @@ mod tests {
             backend: "coreml".to_owned(),
             runtime_requirement: ">=0.1.0".to_owned(),
             format: ModelFormat::CoreMl,
+            platforms: vec![],
+            architectures: vec![],
             artifact_path: "model.mlpackage".to_owned(),
             files: vec![
                 RegisteredModelFile {
@@ -1802,6 +1971,34 @@ mod tests {
         std::fs::write(existing.package_path.join("config.json"), b"corrupt").unwrap();
         assert!(installer.validate(&model, &existing.package_path).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registered_model_rejects_missing_or_malformed_checksums() {
+        let root = std::env::temp_dir().join(format!(
+            "ml-runtime-registration-validation-{}",
+            std::process::id()
+        ));
+        let installer = RegisteredModelInstaller::new(&root).unwrap();
+        let mut model = RegisteredModel {
+            name: "fixture".to_owned(),
+            revision: "revision".to_owned(),
+            source: "https://example.invalid/model".to_owned(),
+            backend: "onnx".to_owned(),
+            runtime_requirement: ">=0.1.0".to_owned(),
+            format: ModelFormat::Onnx,
+            platforms: vec![],
+            architectures: vec![],
+            artifact_path: "model.onnx".to_owned(),
+            files: vec![],
+        };
+        assert!(super::validate_registration(&model).is_err());
+        model.files.push(RegisteredModelFile {
+            path: "model.onnx".to_owned(),
+            sha256: "not-a-sha256".to_owned(),
+        });
+        assert!(super::validate_registration(&model).is_err());
+        assert!(installer.validate(&model, &root).is_err());
     }
 
     #[test]

@@ -1,13 +1,22 @@
 use async_trait::async_trait;
 use futures_util::stream;
-use ml_runtime_backend::{Backend, BackendCapabilities, BackendCapability};
+mod laya;
+use laya::LayaModel;
+
+use ml_runtime_backend::{
+    Backend, BackendCapabilities, BackendCapability, DecisionModel, DecisionModelProvider,
+};
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_inference::{
-    ExecutionMetadata, InferenceChunk, InferenceRequest, InferenceResult, Input, Output, Tensor,
+    DecisionModelCapabilities, DeviceKind, ExecutionMetadata, InferenceChunk, InferenceRequest,
+    InferenceResult, Input, ModelArchitecture, Output, Tensor,
 };
 use ml_runtime_model::{ModelFormat, ModelHandle, ModelLocation, ModelSpec};
 use ort::{session::Session, value::Tensor as OrtTensor};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct OnnxBackend;
@@ -31,6 +40,44 @@ impl OnnxBackend {
         Session::builder()
             .and_then(|builder| builder.commit_from_file(path))
             .map_err(|error| RuntimeError::execution("load", format!("load ONNX model: {error}")))
+    }
+
+    pub fn validate_laya(artifact: &Path) -> RuntimeResult<String> {
+        laya::LayaModel::validate(artifact)
+    }
+
+    /// Execution facts for Laya's ONNX representation. This is separate from
+    /// the generic ONNX tensor backend because architecture is a model fact.
+    pub fn laya_decision_capabilities() -> DecisionModelCapabilities {
+        DecisionModelCapabilities {
+            backend: "onnx".to_owned(),
+            device: DeviceKind::Cpu,
+            model_architecture: ModelArchitecture::StructuredDecision,
+            supports_batching: true,
+            max_batch_size: Some(16),
+            batch_size: None,
+            supports_async: false,
+            supports_cancellation: false,
+            supports_parallel_execution: false,
+            recommended_parallelism: Some(1),
+            supports_structured_decisions: true,
+        }
+    }
+}
+
+impl DecisionModelProvider for OnnxBackend {
+    fn name(&self) -> &str {
+        "onnx"
+    }
+
+    fn supports_artifact(&self, artifact: &Path) -> bool {
+        artifact.join("laya.onnx").is_file()
+            && artifact.join("laya_config.json").is_file()
+            && artifact.join("tokenizer/tokenizer.json").is_file()
+    }
+
+    fn load_decision_model(&self, artifact: &Path) -> RuntimeResult<Box<dyn DecisionModel>> {
+        LayaModel::load(artifact).map(|model| Box::new(model) as Box<dyn DecisionModel>)
     }
 }
 
@@ -65,7 +112,7 @@ impl Backend for OnnxBackend {
         let session = Self::load_session(model)?;
         Ok(ModelHandle::new(
             model.id.clone(),
-            self.name(),
+            Backend::name(self),
             model.format.clone(),
             Arc::new(OnnxLoadedModel {
                 spec: model.clone(),
@@ -138,7 +185,7 @@ impl Backend for OnnxBackend {
             metadata: ExecutionMetadata {
                 model: loaded.spec.id.clone(),
                 provider: "local".to_owned(),
-                backend: self.name().to_owned(),
+                backend: Backend::name(self).to_owned(),
                 hardware: Some("cpu".to_owned()),
                 ..ExecutionMetadata::default()
             },
@@ -178,5 +225,15 @@ mod tests {
             ModelFormat::Onnx,
             ModelLocation::Memory,
         )));
+    }
+
+    #[test]
+    fn reports_factual_laya_execution_capabilities() {
+        let capabilities = OnnxBackend::laya_decision_capabilities();
+        assert_eq!(capabilities.backend, "onnx");
+        assert_eq!(capabilities.device, DeviceKind::Cpu);
+        assert!(capabilities.supports_batching);
+        assert_eq!(capabilities.max_batch_size, Some(16));
+        assert!(!capabilities.supports_cancellation);
     }
 }

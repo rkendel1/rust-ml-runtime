@@ -1,6 +1,9 @@
 #![cfg(all(target_os = "macos", feature = "coreml"))]
 
-use rust_ml_runtime::{DecisionQuestion, DecisionRequest, DecisionType, Runtime};
+use rust_ml_runtime::{
+    DecisionExecutionPolicy, DecisionExecutionStrategy, DecisionGraphRequest, DecisionQuestion,
+    DecisionRequest, DecisionType, Runtime,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -36,10 +39,44 @@ fn executes_local_laya_artifact_through_coreml() {
         "existing Laya artifact is missing tokenizer/tokenizer.json"
     );
 
-    let model = Runtime::builder()
-        .build()
+    let runtime = Runtime::builder().build();
+    let model = runtime
         .load_decision_model(&artifact)
         .expect("load real local Laya artifact");
+    let capabilities = runtime.decision_capabilities(model.as_ref());
+    assert_eq!(capabilities.batch_size, Some(1));
+    assert!(!capabilities.supports_batching);
+    let planning_request = DecisionGraphRequest::independent(
+        DecisionRequest::new(
+            Value::String("planner fixture".to_owned()),
+            vec![
+                DecisionQuestion {
+                    name: "first".to_owned(),
+                    instructions: "First decision".to_owned(),
+                    kind: DecisionType::Noul {
+                        false_description: None,
+                        true_description: None,
+                    },
+                },
+                DecisionQuestion {
+                    name: "second".to_owned(),
+                    instructions: "Second decision".to_owned(),
+                    kind: DecisionType::Noul {
+                        false_description: None,
+                        true_description: None,
+                    },
+                },
+            ],
+        ),
+        DecisionExecutionPolicy::default(),
+    );
+    assert_eq!(
+        runtime
+            .explain_decision(model.as_ref(), &planning_request)
+            .expect("plan Core ML decisions")
+            .strategy,
+        DecisionExecutionStrategy::Sequential
+    );
     let result = model
         .decide(&DecisionRequest::new(
             Value::String("The customer asks for a refund of a duplicate payment.".to_owned()),

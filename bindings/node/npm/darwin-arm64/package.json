@@ -1,6 +1,6 @@
 {
   "name": "@rust-ml-runtime/node-darwin-arm64",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "macOS arm64 native binary for @rust-ml-runtime/node",
   "main": "ml_runtime_node.node",
   "files": ["ml_runtime_node.node"],

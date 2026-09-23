@@ -10,6 +10,6 @@ documentation = "https://docs.rs/ml-runtime-provider"
 
 [dependencies]
 async-trait.workspace = true
-ml-runtime-common = { version = "0.2.0", path = "../common" }
-ml-runtime-inference = { version = "0.2.0", path = "../inference" }
+ml-runtime-common = { version = "0.2.3", path = "../common" }
+ml-runtime-inference = { version = "0.2.3", path = "../inference" }
 serde.workspace = true

@@ -1,0 +1,16 @@
+FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-toolchain
+
+FROM node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}" \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends binutils build-essential ca-certificates libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.36"
+
+WORKDIR /workspace

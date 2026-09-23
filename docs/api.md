@@ -1,9 +1,13 @@
 # Public developer API
 
+For dependency-aware Choice/Score/Noul requests, capability discovery,
+execution policies, async execution, and planning diagnostics, see
+[Structured-decision execution planning](runtime/execution-planning.md).
+
 `rust-ml-runtime` is the supported application-facing Rust crate. Its core API is
 the explicit, application-owned `Runtime`, plus model references, inference
 requests/results, execution policies, and structured errors re-exported at the
-crate root. The workspace is currently `0.1.x`; these APIs are supported but
+crate root. The workspace is currently `0.2.x`; these APIs are supported but
 still pre-1.0 and follow Cargo semantic-versioning conventions.
 
 ## Quickstart

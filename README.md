@@ -20,10 +20,10 @@ ml-runtime model doctor laya
 ml-runtime laya "The customer asks for a refund."
 ```
 
-The runtime and installed model execute locally. The first product path uses
-Laya through Core ML on macOS 15+; Linux and Windows receive the native runtime
-but cannot execute this Core ML model. Model installation may use the network,
-while inference from a READY installation does not.
+The runtime and installed model execute locally. Laya uses ONNX Runtime on
+Linux x86_64/ARM64 and CoreML on macOS/ARM64; unsupported platforms fail with
+an explicit compatibility error. Model installation may use the network, while
+inference from a READY installation does not.
 
 ## Install
 
@@ -31,7 +31,7 @@ Rust applications use the public crate:
 
 ```toml
 [dependencies]
-rust-ml-runtime = "0.1"
+rust-ml-runtime = "0.2.3"
 ```
 
 Node applications use the platform-selecting package:
@@ -106,6 +106,8 @@ Developer documentation is organized from usage toward implementation:
 4. [Models and lifecycle](docs/models.md)
 5. [Core API](docs/api.md#quickstart)
 6. [Architecture](docs/architecture.md)
+7. [Structured-decision planning](docs/runtime/execution-planning.md)
+8. [Agent integration contract](docs/AGENTS.md)
 
 ## Public architecture
 
@@ -121,6 +123,7 @@ rust-ml-runtime
     ├── preprocessing
     ├── tokenizer
     ├── decoding
+    ├── capability-aware execution planning
     └── provenance
     │
     ▼
@@ -131,8 +134,8 @@ Model
 ```
 
 The boundaries are intentional: Model ≠ Runtime, Backend ≠ Runtime, Runtime ≠
-Jev, and Jev ≠ Authority. Core ML is the first distributable backend and Laya
-is the first demonstrated model; neither defines the public runtime
+Jev, and Jev ≠ Authority. ONNX Runtime and CoreML are distributable backends
+for Laya, the first demonstrated model; neither defines the public runtime
 abstraction. Application policy and authorization remain application-owned.
 Jev is a downstream consumer and is not part of the runtime release gate.
 
@@ -144,7 +147,7 @@ provider. Sensitive capabilities fail closed unless an application supplies its
 authorization hook and explicit resource policy. Providers can be added behind
 the runtime's capability boundary without changing application code.
 
-The CLI and Rust API use the workspace version (`0.1.0` currently), exposed by
+The CLI and Rust API use the workspace version (`0.2.3` currently), exposed by
 `ml-runtime --version` and `CARGO_PKG_VERSION`. The wire protocol is `/v1`;
 supported routes are `/v1/health`, `/v1/capabilities`, `/v1/models`,
 `/v1/infer`, and `/v1/infer/stream`. Protocol versions are independent of
@@ -157,7 +160,7 @@ boundary.
 
 ## Models and server
 
-### Native Laya distribution (macOS)
+### Native Laya distribution
 
 Install the pinned Laya package into the runtime-owned application data
 directory, then execute it without Python or a Hugging Face CLI:
@@ -172,12 +175,11 @@ ml-runtime model doctor laya
 `ML_RUNTIME_MODEL_DIR` overrides the installed-model root. Development and
 offline tests can override the registry source with `--source ./models/laya`
 or `ML_RUNTIME_LAYA_SOURCE`; normal installation uses the registry's pinned
-HTTPS snapshot. Installation compiles and validates Core ML before publishing a
-READY installation manifest. Normal inference only loads that prepared
-artifact and never silently compiles or repairs it. The authoritative artifact
-remains `model.mlpackage` plus its tokenizer and configuration. Core ML's
-compiled representation is disposable runtime state under the runtime cache
-and is never used as package identity.
+HTTPS snapshot. Linux selects and validates the ONNX graph, external weights,
+tokenizer, and calibration config. macOS/ARM64 compiles and validates CoreML.
+Both paths publish a READY installation manifest only after backend
+initialization succeeds, and neither silently downloads or repairs at
+inference time.
 
 The server owns model packages and clients send model identities, not server
 filesystem paths:
@@ -198,8 +200,8 @@ the [release contract](docs/release.md).
 ## Supported platforms
 
 Release builds target Linux x86_64, Linux ARM64, macOS Intel, macOS Apple
-Silicon, and Windows x86_64 when the corresponding CI job passes. CPU inference is available
-without Core ML. Core ML is macOS-only; GPU, WebGPU/WASM, and CUDA support may
+Silicon, and Windows x86_64 when the corresponding CI job passes. Laya uses
+ONNX on supported Linux hosts and CoreML on macOS/ARM64. GPU, WebGPU/WASM, and CUDA support may
 be unavailable or experimental depending on the build. Check
 `ml-runtime capabilities` rather than assuming a backend is present.
 

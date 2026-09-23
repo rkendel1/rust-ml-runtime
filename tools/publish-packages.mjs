@@ -134,6 +134,11 @@ async function main() {
   if (typeof fetch !== 'function') {
     throw new Error('Global fetch is required for registry preflight; run this script with Node.js 18 or newer');
   }
+  const linuxX64Package = platformPackages.find((packagePath) =>
+    basename(packagePath) === `rust-ml-runtime-node-linux-x64-gnu-${version}.tgz`
+  );
+  if (!linuxX64Package) throw new Error('Linux x64 native package is missing from the publish set');
+  run('node', ['tools/check-glibc-compat.mjs', linuxX64Package]);
   const userAgent = 'rust-ml-runtime-release (github.com/rkendel1/rust-ml-runtime)';
   const registryHeaders = { 'user-agent': userAgent };
   const npmRegistryHeaders = { ...registryHeaders };

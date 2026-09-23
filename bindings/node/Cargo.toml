@@ -14,6 +14,7 @@ ml-runtime = { package = "rust-ml-runtime", path = "../../crates/runtime", featu
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 serde_json.workspace = true
+tokio.workspace = true
 
 [build-dependencies]
 napi-build = "2"

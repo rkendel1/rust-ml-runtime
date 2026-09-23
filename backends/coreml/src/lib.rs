@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures_util::stream;
 use ml_runtime_backend::{Backend, BackendCapabilities, BackendCapability};
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
-use ml_runtime_inference::Input;
+use ml_runtime_inference::{DecisionModelCapabilities, DeviceKind, Input, ModelArchitecture};
 #[cfg(target_os = "macos")]
 use ml_runtime_inference::{ExecutionMetadata, Output, Tensor};
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
@@ -13,6 +13,26 @@ mod laya;
 
 #[derive(Clone, Debug, Default)]
 pub struct CoreMlBackend;
+
+impl CoreMlBackend {
+    /// Execution facts for Laya's Core ML representation. The native loader
+    /// explicitly requests Apple's CPU-and-GPU compute units.
+    pub fn laya_decision_capabilities() -> DecisionModelCapabilities {
+        DecisionModelCapabilities {
+            backend: "coreml".to_owned(),
+            device: DeviceKind::Other("apple_cpu_gpu".to_owned()),
+            model_architecture: ModelArchitecture::StructuredDecision,
+            supports_batching: false,
+            max_batch_size: Some(1),
+            batch_size: Some(1),
+            supports_async: false,
+            supports_cancellation: false,
+            supports_parallel_execution: false,
+            recommended_parallelism: Some(1),
+            supports_structured_decisions: true,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct CoreMlLoadedModel {
@@ -662,6 +682,19 @@ mod tests {
                 .any(|note| note.contains("unsupported platform")));
             assert!(capabilities.accelerators.is_empty());
         }
+    }
+
+    #[test]
+    fn reports_factual_laya_execution_capabilities() {
+        let capabilities = CoreMlBackend::laya_decision_capabilities();
+        assert_eq!(capabilities.backend, "coreml");
+        assert_eq!(
+            capabilities.device,
+            DeviceKind::Other("apple_cpu_gpu".to_owned())
+        );
+        assert_eq!(capabilities.batch_size, Some(1));
+        assert!(!capabilities.supports_batching);
+        assert!(!capabilities.supports_cancellation);
     }
 
     #[tokio::test]

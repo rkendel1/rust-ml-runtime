@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeResult};
-use ml_runtime_inference::{DecisionRequest, DecisionResult, ModelDescription};
+use ml_runtime_inference::{
+    DecisionModelCapabilities, DecisionRequest, DecisionResult, ModelDescription,
+};
 use ml_runtime_inference::{InferenceChunk, InferenceRequest, InferenceResult};
 use ml_runtime_model::{ModelFormat, ModelHandle, ModelSpec};
 use serde::{Deserialize, Serialize};
@@ -94,6 +96,9 @@ pub trait Backend: Send + Sync {
 /// Loaded model-neutral typed-decision model.
 pub trait DecisionModel: Send + Sync {
     fn describe(&self) -> ModelDescription;
+    fn capabilities(&self) -> DecisionModelCapabilities {
+        DecisionModelCapabilities::conservative(self.describe().backend)
+    }
     fn decide(&self, request: &DecisionRequest) -> RuntimeResult<DecisionResult>;
 }
 

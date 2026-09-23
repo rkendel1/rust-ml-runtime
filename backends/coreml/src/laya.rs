@@ -8,8 +8,8 @@
 use ml_runtime_backend::DecisionModel;
 use ml_runtime_common::{RuntimeError, RuntimeResult};
 use ml_runtime_inference::{
-    DecisionExecution, DecisionProvenance, DecisionRequest, DecisionResult, DecisionType,
-    DecisionValue, ModelDescription, ModelIdentity, TypedDecision,
+    DecisionExecution, DecisionModelCapabilities, DecisionProvenance, DecisionRequest,
+    DecisionResult, DecisionType, DecisionValue, ModelDescription, ModelIdentity, TypedDecision,
 };
 use ml_runtime_model::{CompiledStatus, InstallationManifest, INSTALLATION_MANIFEST_FILE};
 use serde::Deserialize;
@@ -663,6 +663,10 @@ impl DecisionModel for LayaModel {
             artifact_sha256: self.artifact_hash.clone(),
             decision_types: vec!["choice".to_owned(), "score".to_owned(), "noul".to_owned()],
         }
+    }
+
+    fn capabilities(&self) -> DecisionModelCapabilities {
+        crate::CoreMlBackend::laya_decision_capabilities()
     }
 
     fn decide(&self, request: &DecisionRequest) -> RuntimeResult<DecisionResult> {

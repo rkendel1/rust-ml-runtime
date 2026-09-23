@@ -1,5 +1,19 @@
 # Node and TypeScript
 
+The preferred interactive structured-decision path is async:
+
+```js
+const local = await LocalML.create();
+const capabilities = local.capabilities("laya");
+const plan = local.explainDecision({ model: "laya", input, nodes });
+const result = await local.executeGraph({ model: "laya", input, nodes });
+```
+
+`decide()` and `decideJson()` remain synchronous compatibility APIs.
+`decideAsync()` and `executeGraph()` keep synchronous native inference off the
+Node event loop. See the [planner contract](runtime/execution-planning.md) for
+policies, graph conditions, cancellation, and diagnostics.
+
 Install the public package as a normal application dependency:
 
 ```sh

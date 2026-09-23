@@ -5,5 +5,5 @@ edition = "2021"
 publish = false
 
 [dependencies]
-rust-ml-runtime = "0.1"
+rust-ml-runtime = "0.2.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

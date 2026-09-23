@@ -10,10 +10,10 @@ documentation = "https://docs.rs/ml-runtime-http-provider"
 
 [dependencies]
 async-trait.workspace = true
-ml-runtime-common = { version = "0.2.0", path = "../../crates/common" }
-ml-runtime-inference = { version = "0.2.0", path = "../../crates/inference" }
-ml-runtime-provider = { version = "0.2.0", path = "../../crates/provider" }
-ml-runtime-protocol = { version = "0.2.0", path = "../../crates/protocol" }
+ml-runtime-common = { version = "0.2.3", path = "../../crates/common" }
+ml-runtime-inference = { version = "0.2.3", path = "../../crates/inference" }
+ml-runtime-provider = { version = "0.2.3", path = "../../crates/provider" }
+ml-runtime-protocol = { version = "0.2.3", path = "../../crates/protocol" }
 reqwest.workspace = true
 futures-util.workspace = true
 tokio.workspace = true

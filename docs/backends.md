@@ -10,6 +10,10 @@ Current workspace backends:
 - `cuda`: CUDA integration boundary
 - `webgpu`: WebGPU/WASM integration boundary
 
+Loaded structured-decision models expose a second, model-specific capability
+contract used by the execution planner. See the factual matrix and deterministic
+strategy rules in [Structured-decision execution planning](runtime/execution-planning.md).
+
 The CPU and ONNX backends execute portably. Core ML executes tensor models through Apple's
 `MLModel`/`MLMultiArray` APIs on macOS; its compiled `.mlmodelc` artifact remains inside the
 normal model package. Core ML accepts dense `f32` tensors and reports `available: false` with an

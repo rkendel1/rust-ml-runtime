@@ -47,6 +47,7 @@ function logDiagnostics(diagnostics) {
   console.error(`rust-ml-runtime: package resolved ${diagnostics.packageResolved ?? 'unresolved'}`);
   console.error(`rust-ml-runtime: native binary ${diagnostics.nativeBinary ?? 'missing'}`);
   console.error(`rust-ml-runtime: load ${diagnostics.load}`);
+  console.error(`rust-ml-runtime: status ${diagnostics.status}`);
   if (diagnostics.error) console.error(`rust-ml-runtime: error ${diagnostics.error.message}`);
 }
 
@@ -165,6 +166,7 @@ class LocalML {
 
   static selfTest(options = {}) {
     const nativeDiagnostics = diagnoseNative();
+    let modelDescription;
     const checks = [{
       check: 'native binding',
       ok: nativeDiagnostics.available,
@@ -175,9 +177,13 @@ class LocalML {
     }];
     if (options.model) {
       try {
-        const model = new LocalDecisionModel(options.model, options.modelRoot);
-        JSON.parse(model.descriptionJson());
-        checks.push({ check: 'local inference', ok: true, message: 'model loaded' });
+        const model = new native.LocalDecisionModel(options.model, options.modelRoot);
+        modelDescription = JSON.parse(model.descriptionJson());
+        checks.push({
+          check: 'local inference',
+          ok: true,
+          message: `model loaded with ${modelDescription.backend}`,
+        });
       } catch (error) {
         checks.push({
           check: 'local inference',
@@ -190,6 +196,7 @@ class LocalML {
     return {
       available: checks.every((check) => check.ok),
       platform: nativeDiagnostics.platform,
+      model: modelDescription,
       checks,
     };
   }
@@ -198,12 +205,58 @@ class LocalML {
     if (!model || !Array.isArray(decisions) || decisions.length === 0) {
       throw new TypeError('decide requires model and at least one typed decision');
     }
+    const loaded = this.#load(model);
+    return JSON.parse(loaded.decideJson(JSON.stringify({ state: input, decisions })));
+  }
+
+  async decideAsync({ model, input, decisions, policy, cancellation }) {
+    if (!model || !Array.isArray(decisions) || decisions.length === 0) {
+      throw new TypeError('decideAsync requires model and at least one typed decision');
+    }
+    const loaded = this.#load(model);
+    const result = await loaded.decideAsyncJson(
+      JSON.stringify({ state: input, decisions }),
+      policy === undefined ? undefined : JSON.stringify(policy),
+      cancellation,
+    );
+    return JSON.parse(result);
+  }
+
+  capabilities(model) {
+    if (!model) throw new TypeError('capabilities requires a model');
+    return JSON.parse(this.#load(model).capabilitiesJson());
+  }
+
+  explainDecision({ model, input, nodes, policy }) {
+    if (!model || !Array.isArray(nodes) || nodes.length === 0) {
+      throw new TypeError('explainDecision requires model and at least one node');
+    }
+    return JSON.parse(this.#load(model).explainDecisionJson(JSON.stringify({
+      state: input,
+      nodes,
+      policy,
+    })));
+  }
+
+  async executeGraph({ model, input, nodes, policy, cancellation }) {
+    if (!model || !Array.isArray(nodes) || nodes.length === 0) {
+      throw new TypeError('executeGraph requires model and at least one node');
+    }
+    const result = await this.#load(model).executeGraphJson(JSON.stringify({
+      state: input,
+      nodes,
+      policy,
+    }), cancellation);
+    return JSON.parse(result);
+  }
+
+  #load(model) {
     let loaded = this.models.get(model);
     if (!loaded) {
       loaded = new native.LocalDecisionModel(model, this.modelRoot);
       this.models.set(model, loaded);
     }
-    return JSON.parse(loaded.decideJson(JSON.stringify({ state: input, decisions })));
+    return loaded;
   }
 }
 

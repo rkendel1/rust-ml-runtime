@@ -9,7 +9,15 @@ const test = require('node:test');
 
 const loader = path.resolve(__dirname, '..', 'index.cjs');
 const rootPackageDirectory = path.resolve(__dirname, '..');
-const nativePackageDirectory = path.resolve(__dirname, '..', 'npm', 'linux-x64-gnu');
+const nativePlatform = {
+  'darwin-arm64': 'darwin-arm64',
+  'darwin-x64': 'darwin-x64',
+  'linux-arm64': 'linux-arm64-gnu',
+  'linux-x64': 'linux-x64-gnu',
+  'win32-x64': 'win32-x64-msvc',
+}[`${process.platform}-${process.arch}`];
+const nativePackageName = `@rust-ml-runtime/node-${nativePlatform}`;
+const nativePackageDirectory = path.resolve(__dirname, '..', 'npm', nativePlatform);
 
 function run(script, env = {}) {
   return spawnSync(process.execPath, ['-e', script], {
@@ -43,6 +51,44 @@ test('loads an injected addon and reports a successful self-test', () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('exposes capability-driven async decisions without changing the sync API', () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'rust-ml-node-'));
+  const addon = path.join(directory, 'addon.cjs');
+  writeFileSync(addon, `
+    class DecisionCancellation {
+      constructor() { this.isCancelled = false; }
+      cancel() { this.isCancelled = true; }
+    }
+    class LocalDecisionModel {
+      capabilitiesJson() { return JSON.stringify({ backend: 'fixture', device: 'cpu' }); }
+      explainDecisionJson() {
+        return JSON.stringify({ strategy: { type: 'batched', batch_size: 4 }, reason: 'backend_batching', stages: [] });
+      }
+      decideJson(request) { return JSON.stringify({ mode: 'sync', request: JSON.parse(request) }); }
+      async decideAsyncJson(request) { return JSON.stringify({ mode: 'async', request: JSON.parse(request) }); }
+      async executeGraphJson(request) { return JSON.stringify({ mode: 'graph', request: JSON.parse(request) }); }
+    }
+    module.exports = { DecisionCancellation, LocalDecisionModel };
+  `);
+  const result = run(`
+    (async () => {
+      const runtime = require(${JSON.stringify(loader)});
+      const local = await runtime.LocalML.create();
+      const question = { name: 'intent', instructions: 'classify', kind: { type: 'noul' } };
+      if (local.decide({ model: 'fixture', input: {}, decisions: [question] }).mode !== 'sync') process.exit(1);
+      if ((await local.decideAsync({ model: 'fixture', input: {}, decisions: [question] })).mode !== 'async') process.exit(2);
+      if (local.capabilities('fixture').backend !== 'fixture') process.exit(3);
+      const graph = { model: 'fixture', input: {}, nodes: [{ question }] };
+      if (local.explainDecision(graph).reason !== 'backend_batching') process.exit(4);
+      if ((await local.executeGraph(graph)).mode !== 'graph') process.exit(5);
+      const cancellation = new runtime.DecisionCancellation();
+      cancellation.cancel();
+      if (!cancellation.isCancelled) process.exit(6);
+    })().catch((error) => { console.error(error); process.exit(7); });
+  `, { ML_RUNTIME_NODE_ADDON: addon });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('distinguishes a missing optional package', () => {
   const result = run(`
     try { require(${JSON.stringify(loader)}); process.exit(1); }
@@ -56,10 +102,10 @@ test('distinguishes a missing optional package', () => {
 
 test('distinguishes a package without its native artifact', () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'rust-ml-node-'));
-  const packageDirectory = path.join(directory, '@rust-ml-runtime', 'node-linux-x64-gnu');
+  const packageDirectory = path.join(directory, ...nativePackageName.split('/'));
   mkdirSync(packageDirectory, { recursive: true });
   writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({
-    name: '@rust-ml-runtime/node-linux-x64-gnu',
+    name: nativePackageName,
     main: 'ml_runtime_node.node',
   }));
   const result = run(`
@@ -75,10 +121,10 @@ test('distinguishes a package without its native artifact', () => {
 
 test('preserves native load failures after resolving the package', () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'rust-ml-node-'));
-  const packageDirectory = path.join(directory, '@rust-ml-runtime', 'node-linux-x64-gnu');
+  const packageDirectory = path.join(directory, ...nativePackageName.split('/'));
   mkdirSync(packageDirectory, { recursive: true });
   writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({
-    name: '@rust-ml-runtime/node-linux-x64-gnu',
+    name: nativePackageName,
     main: 'ml_runtime_node.js',
   }));
   writeFileSync(path.join(packageDirectory, 'ml_runtime_node.js'), 'throw new Error("ABI mismatch");');
@@ -134,14 +180,14 @@ test('installs the packed root and native tarballs offline from absolute paths',
     path.join(project, 'node_modules', '@rust-ml-runtime', 'node', 'package.json'),
     'utf8',
   ));
-  assert.equal(installedManifest.optionalDependencies['@rust-ml-runtime/node-linux-x64-gnu'], nativeManifest.version);
-  assert.ok(!installedManifest.optionalDependencies['@rust-ml-runtime/node-linux-x64-gnu'].startsWith('file:'));
+  assert.equal(installedManifest.optionalDependencies[nativePackageName], nativeManifest.version);
+  assert.ok(!installedManifest.optionalDependencies[nativePackageName].startsWith('file:'));
 
   const result = run(`
     const runtime = require('@rust-ml-runtime/node');
     const diagnostics = runtime.diagnoseNative();
     if (!diagnostics.available) process.exit(1);
-    if (diagnostics.packageName !== '@rust-ml-runtime/node-linux-x64-gnu') process.exit(2);
+    if (diagnostics.packageName !== ${JSON.stringify(nativePackageName)}) process.exit(2);
   `, { NODE_PATH: path.join(project, 'node_modules') });
   assert.equal(result.status, 0, result.stderr);
 });
