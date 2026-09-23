@@ -58,6 +58,10 @@ after registry publication succeeds. `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN`
 must have the corresponding publish access. Registry preflight rejects any
 existing immutable version before the first publication attempt.
 
+Pushing a `v*` tag publishes automatically. A manually triggered workflow run
+builds and verifies artifacts without publishing by default; set its
+`publish` input to `true` to opt into publication for the selected `version`.
+
 For an authorized local release, export `CARGO_REGISTRY_TOKEN` and
 `NODE_AUTH_TOKEN`, collect the release artifacts under `artifacts/`, and run:
 
