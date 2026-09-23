@@ -192,8 +192,7 @@ jobs:
           project="$(mktemp -d)"
           cd "$project"
           npm init -y >/dev/null
-          npm cache add "$native_package"
-          npm install --offline --include=optional --ignore-scripts "$root_package"
+          npm install --offline --include=optional --ignore-scripts "$root_package" "$native_package"
           node - <<'NODE'
           const runtime = require('@rust-ml-runtime/node');
           const diagnostics = runtime.diagnoseNative();
