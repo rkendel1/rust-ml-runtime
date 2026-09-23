@@ -57,6 +57,7 @@ async function main() {
 
   const nodeRoot = JSON.parse(readFileSync('bindings/node/package.json', 'utf8'));
   if (nodeRoot.version !== version) throw new Error(`${nodeRoot.name} is ${nodeRoot.version}; expected ${version}`);
+  const optionalDependencies = nodeRoot.optionalDependencies ?? {};
 
   if (!dryRun) {
     if (!npmOnly && !process.env.CARGO_REGISTRY_TOKEN) {
@@ -108,7 +109,7 @@ async function main() {
       }
     }
   }
-  for (const name of [nodeRoot.name, ...Object.keys(nodeRoot.optionalDependencies)]) {
+  for (const name of [nodeRoot.name, ...Object.keys(optionalDependencies)]) {
     const encoded = encodeURIComponent(name).replace('%2F', '%2f');
     if (await exists(`https://registry.npmjs.org/${encoded}/${version}`)) {
       throw new Error(`${name}@${version} already exists on npm; refusing a duplicate coordinated release`);
