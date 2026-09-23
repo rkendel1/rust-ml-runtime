@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const crateOrder = [
   'ml-runtime-common',
@@ -58,6 +58,12 @@ async function main() {
   const nodeRoot = JSON.parse(readFileSync('bindings/node/package.json', 'utf8'));
   if (nodeRoot.version !== version) throw new Error(`${nodeRoot.name} is ${nodeRoot.version}; expected ${version}`);
   const optionalDependencies = nodeRoot.optionalDependencies ?? {};
+  const expectedPlatformPackages = Object.keys(optionalDependencies).map((name) => {
+    if (!name.startsWith(`${nodeRoot.name}-`)) {
+      throw new Error(`Unexpected optional dependency ${name}; expected ${nodeRoot.name}-<platform>`);
+    }
+    return `rust-ml-runtime-node-${name.slice(`${nodeRoot.name}-`.length)}-${version}.tgz`;
+  }).sort();
 
   if (!dryRun) {
     if (!npmOnly && !process.env.CARGO_REGISTRY_TOKEN) {
@@ -76,13 +82,17 @@ async function main() {
   const rootPattern = new RegExp(`rust-ml-runtime-node-${versionPattern}\\.tgz$`);
   const platformPackages = npmTarballs.filter((path) => nativePattern.test(path));
   const rootPackages = npmTarballs.filter((path) => rootPattern.test(path));
+  const discoveredPlatformPackages = platformPackages.map((path) => basename(path)).sort();
 
   console.log(`Using release artifacts from ${artifacts}`);
   console.log(`Discovered ${npmTarballs.length} npm tarball(s):${formatPaths(npmTarballs)}`);
-  if (platformPackages.length !== 5 || rootPackages.length !== 1) {
+  if (
+    rootPackages.length !== 1 ||
+    JSON.stringify(discoveredPlatformPackages) !== JSON.stringify(expectedPlatformPackages)
+  ) {
     throw new Error(
-      `Expected five native npm packages and one root package for ${version}; ` +
-      `found ${platformPackages.length} native and ${rootPackages.length} root package(s). ` +
+      `Expected native npm tarballs ${expectedPlatformPackages.join(', ')} and one root package for ${version}; ` +
+      `found native tarballs ${discoveredPlatformPackages.join(', ') || '(none)'} and ${rootPackages.length} root package(s). ` +
       `Check that --artifacts points at the release run for version ${version}.`
     );
   }

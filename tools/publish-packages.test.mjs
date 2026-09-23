@@ -116,6 +116,6 @@ test('npm-only publish reports an artifact/version mismatch clearly', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /rust-ml-runtime-node-0\.1\.0\.tgz/);
-  assert.match(result.stderr, /Expected five native npm packages and one root package for 0\.2\.0/);
+  assert.match(result.stderr, /Expected native npm tarballs .*0\.2\.0.* and one root package for 0\.2\.0/);
   assert.match(result.stderr, /Check that --artifacts points at the release run for version 0\.2\.0/);
 });
