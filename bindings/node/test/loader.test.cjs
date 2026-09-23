@@ -6,6 +6,7 @@ const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { gunzipSync } = require('node:zlib');
 
 const loader = path.resolve(__dirname, '..', 'index.cjs');
 const rootPackageDirectory = path.resolve(__dirname, '..');
@@ -25,6 +26,25 @@ function pack(directory, destination) {
   });
   assert.equal(result.status, 0, result.stderr);
   return path.join(destination, result.stdout.trim().split(/\r?\n/).at(-1));
+}
+
+function readPackedFile(tarball, file) {
+  const archive = gunzipSync(readFileSync(tarball));
+  let offset = 0;
+  while (offset + 512 <= archive.length) {
+    const header = archive.subarray(offset, offset + 512);
+    if (header.every(byte => byte === 0)) break;
+    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const size = Number.parseInt(
+      header.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim() || '0',
+      8,
+    );
+    const start = offset + 512;
+    const end = start + size;
+    if (name === file) return archive.subarray(start, end).toString('utf8');
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`missing ${file} in ${tarball}`);
 }
 
 test('loads an injected addon and reports a successful self-test', () => {
@@ -116,9 +136,7 @@ test('installs the packed root and native tarballs offline from absolute paths',
 
   const rootTarball = pack(rootSource, tarballs);
   const nativeTarball = pack(nativeSource, tarballs);
-  const packedRootManifest = spawnSync('tar', ['-xOf', rootTarball, 'package/package.json'], { encoding: 'utf8' });
-  assert.equal(packedRootManifest.status, 0, packedRootManifest.stderr);
-  const optionalDependencies = JSON.parse(packedRootManifest.stdout).optionalDependencies;
+  const optionalDependencies = JSON.parse(readPackedFile(rootTarball, 'package/package.json')).optionalDependencies;
   assert.equal(optionalDependencies['@rust-ml-runtime/node-linux-x64-gnu'], nativeManifest.version);
   assert.ok(!optionalDependencies['@rust-ml-runtime/node-linux-x64-gnu'].startsWith('file:'));
 
