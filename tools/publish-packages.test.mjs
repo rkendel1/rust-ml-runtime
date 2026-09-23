@@ -123,3 +123,21 @@ test('npm-only publish reports an artifact/version mismatch clearly', () => {
   assert.match(result.stderr, /Expected one root npm package tarball for 0\.2\.0; found 0/);
   assert.match(result.stderr, /Check that --artifacts points at the release run for version 0\.2\.0/);
 });
+
+test('npm-only publish reports when tar is unavailable', () => {
+  const { artifacts } = createArtifacts('0.2.0');
+  const result = spawnSync(process.execPath, [
+    publishScript,
+    '--dry-run',
+    '--npm-only',
+    '--version', '0.2.0',
+    '--artifacts', artifacts,
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: '' },
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /tar is required to inspect release artifacts on this runner/);
+});

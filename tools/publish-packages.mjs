@@ -38,17 +38,16 @@ const collect = (directory, predicate, found = []) => {
 };
 const formatPaths = paths => paths.length ? `\n - ${paths.join('\n - ')}` : '\n - (none)';
 const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const ensureCommandAvailable = (command) => {
+const readTarJson = (archive, file) => {
   try {
-    execFileSync(command, ['--version'], { stdio: 'ignore' });
+    return JSON.parse(execFileSync('tar', ['-xOf', archive, `package/${file}`], { encoding: 'utf8' }));
   } catch (error) {
     if (error?.code === 'ENOENT' || error?.cause?.code === 'ENOENT') {
-      throw new Error(`${command} is required to inspect release artifacts on this runner`);
+      throw new Error('tar is required to inspect release artifacts on this runner');
     }
     throw error;
   }
 };
-const readTarJson = (archive, file) => JSON.parse(execFileSync('tar', ['-xOf', archive, `package/${file}`], { encoding: 'utf8' }));
 
 async function main() {
   const releasePackage = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -88,7 +87,6 @@ async function main() {
   console.log(`Discovered ${npmTarballs.length} npm tarball(s):${formatPaths(npmTarballs)}`);
   let nodeRoot;
   if (npmOnly) {
-    ensureCommandAvailable('tar');
     if (rootPackages.length !== 1) {
       throw new Error(
         `Expected one root npm package tarball for ${version}; found ${rootPackages.length}. ` +
