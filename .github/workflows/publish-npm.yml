@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to publish
+        description: Release version to publish (0.2.0 only)
         required: true
         default: 0.2.0
       source_run:
-        description: Release workflow run containing the packages
+        description: Release workflow run containing the version 0.2.0 artifacts
         required: true
-        default: "35784883279"
+        default: "35808900241"
 
 permissions:
   actions: read
@@ -70,25 +70,32 @@ jobs:
           path: artifacts/release-metadata
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run }}
+      - name: Inspect downloaded artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          if [[ "$version" != "0.2.0" ]]; then
+            echo "::error::This recovery workflow only publishes version 0.2.0 (received ${RELEASE_VERSION})"
+            exit 1
+          fi
+          echo "Source release run: ${{ inputs.source_run }}"
+          echo "Downloaded artifact files:"
+          find artifacts -type f -print | sort
+          if [[ -f artifacts/release-metadata/release-manifest.json ]]; then
+            echo "Release manifest:"
+            cat artifacts/release-metadata/release-manifest.json
+          fi
+          node tools/validate-node-packages.mjs artifacts "$version"
       - name: Publish native packages, then root package
         shell: bash
         run: |
           set -euo pipefail
-          version="$RELEASE_VERSION"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test -n "$NODE_AUTH_TOKEN"
-
-          mapfile -t native_packages < <(
-            find artifacts -type f \
-              -name "rust-ml-runtime-node-*-${version}.tgz" \
-              ! -name "rust-ml-runtime-node-${version}.tgz" \
-              | sort
-          )
-          root_package="artifacts/macos-aarch64/rust-ml-runtime-node-${version}.tgz"
-          test "${#native_packages[@]}" -eq 5
-          test -f "$root_package"
-
-          for package in "${native_packages[@]}"; do
-            npm publish --access public "$package"
-          done
-          npm publish --access public "$root_package"
+          version="${RELEASE_VERSION#v}"
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::error::NODE_AUTH_TOKEN is missing"
+            exit 1
+          fi
+          npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          npm whoami --registry=https://registry.npmjs.org >/dev/null
+          npm run publish:packages -- --version "$version" --artifacts artifacts --npm-only

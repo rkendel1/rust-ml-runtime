@@ -33,7 +33,7 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: candidate="${RELEASE_VERSION##*/}"; node tools/check-package-versions.mjs "${candidate#v}"
       - run: node tools/check-release-boundary.mjs
-      - run: node --test bindings/node/test/loader.test.cjs
+      - run: node --test bindings/node/test/loader.test.cjs tools/publish-packages.test.mjs
       - run: npm pack --dry-run
         working-directory: bindings/node
 
@@ -274,6 +274,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
       - name: Publish crates.io and npm packages
