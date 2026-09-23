@@ -127,6 +127,7 @@ test('npm-only publish reports an artifact/version mismatch clearly', () => {
 
 test('npm-only publish reports when tar is unavailable', () => {
   const { artifacts } = createArtifacts('0.2.0');
+  const withoutTar = mkdtempSync(path.join(os.tmpdir(), 'rust-ml-no-tar-'));
   const result = spawnSync(process.execPath, [
     publishScript,
     '--dry-run',
@@ -136,7 +137,7 @@ test('npm-only publish reports when tar is unavailable', () => {
   ], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { ...process.env, PATH: '' },
+    env: { ...process.env, PATH: withoutTar },
   });
 
   assert.notEqual(result.status, 0);
