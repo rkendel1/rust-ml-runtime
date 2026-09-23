@@ -124,7 +124,7 @@ async function main() {
     return;
   }
 
-  const userAgent = 'rust-ml-runtime-release/0.1 (github.com/rkendel1/rust-ml-runtime)';
+  const userAgent = 'rust-ml-runtime-release (github.com/rkendel1/rust-ml-runtime)';
   const exists = async (url) => {
     const response = await fetch(url, { headers: { 'user-agent': userAgent } });
     if (response.status === 404) return false;
