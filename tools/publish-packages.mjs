@@ -45,7 +45,8 @@ const readTarJson = (archive, file) => {
     if (error?.code === 'ENOENT' || error?.cause?.code === 'ENOENT') {
       throw new Error('tar is required to inspect release artifacts on this runner');
     }
-    throw error;
+    const detail = String(error?.stderr ?? error?.message ?? error).trim();
+    throw new Error(`Failed to read package/${file} from ${archive}: ${detail}`);
   }
 };
 
