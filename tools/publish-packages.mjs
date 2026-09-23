@@ -145,7 +145,7 @@ async function main() {
     }
   }
   for (const name of [nodeRoot.name, ...Object.keys(optionalDependencies)]) {
-    const encoded = encodeURIComponent(name).replaceAll('%2F', '%2f');
+    const encoded = encodeURIComponent(name).replace(/%2F/gi, '%2f');
     if (await exists(`https://registry.npmjs.org/${encoded}/${version}`)) {
       throw new Error(`${name}@${version} already exists on npm; refusing a duplicate coordinated release`);
     }
