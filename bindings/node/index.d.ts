@@ -17,6 +17,39 @@ export interface LocalMLOptions {
   modelRoot?: string;
 }
 
+export interface NativeDiagnostics {
+  platform: string;
+  packageName: string | null;
+  packageInstalled: boolean;
+  packageResolved: string | null;
+  nativeBinary: string | null;
+  nativeBinaryPresent: boolean;
+  load: "success" | "failure";
+  status: "available" | "unavailable";
+  code?: string;
+  error?: Error;
+  available: boolean;
+}
+
+export class NativeLoadError extends Error {
+  code: string;
+  diagnostics: NativeDiagnostics;
+  diagnostic: NativeDiagnostics;
+}
+
+export function diagnoseNative(): NativeDiagnostics;
+
+export interface LocalMLSelfTestResult {
+  available: boolean;
+  platform: string;
+  checks: Array<{
+    check: string;
+    ok: boolean;
+    message: string;
+    code?: string;
+  }>;
+}
+
 export interface LocalMLDecisionRequest {
   model: string;
   input: unknown;
@@ -52,5 +85,6 @@ export interface LocalMLDecisionResult {
 
 export class LocalML {
   static create(options?: LocalMLOptions): Promise<LocalML>;
+  static selfTest(options?: LocalMLOptions & { model?: string }): LocalMLSelfTestResult;
   decide(request: LocalMLDecisionRequest): LocalMLDecisionResult;
 }

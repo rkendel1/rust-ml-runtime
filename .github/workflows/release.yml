@@ -28,6 +28,7 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: candidate="${RELEASE_VERSION##*/}"; node tools/check-package-versions.mjs "${candidate#v}"
       - run: node tools/check-release-boundary.mjs
+      - run: node --test bindings/node/test/loader.test.cjs
       - run: npm pack --dry-run
         working-directory: bindings/node
 
@@ -140,6 +141,7 @@ jobs:
             (cd "$(dirname "$checksum")" && sha256sum -c "$(basename "$checksum")")
           done < <(find artifacts -name '*.sha256' -type f | sort)
           node tools/release-manifest.mjs "$version" artifacts release-manifest.json
+          node tools/validate-node-packages.mjs artifacts "$version"
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -print0 \
             | sort -z | xargs -0 sha256sum | sed 's#  artifacts/[^/]*/#  #' > SHA256SUMS
       - name: Smoke test the verified installer
@@ -167,6 +169,37 @@ jobs:
           path: |
             release-manifest.json
             SHA256SUMS
+
+  verify-node-linux:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Install the published package shape with optional dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION##*/}"
+          version="${version#v}"
+          root_package="$(find artifacts/macos-aarch64 -name "rust-ml-runtime-node-${version}.tgz" -print -quit)"
+          native_package="$(find artifacts/linux-x86_64 -name "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz" -print -quit)"
+          test -n "$root_package"
+          test -n "$native_package"
+          project="$(mktemp -d)"
+          cd "$project"
+          npm init -y >/dev/null
+          npm cache add "$native_package"
+          npm install --offline --include=optional --ignore-scripts "$root_package"
+          node - <<'NODE'
+          const runtime = require('@rust-ml-runtime/node');
+          const diagnostics = runtime.diagnoseNative();
+          if (!diagnostics.available || diagnostics.packageName !== '@rust-ml-runtime/node-linux-x64-gnu') {
+            console.error(diagnostics);
+            process.exit(1);
+          }
+          NODE
 
   verify-laya-release:
     needs: [package, metadata]
