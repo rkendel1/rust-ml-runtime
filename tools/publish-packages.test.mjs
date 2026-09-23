@@ -4,10 +4,11 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publishScript = path.join(repoRoot, 'tools', 'publish-packages.mjs');
+const publishScriptUrl = pathToFileURL(publishScript).href;
 
 function pack(directory, destination) {
   const result = spawnSync('npm', ['pack'], {
@@ -140,4 +141,29 @@ test('npm-only publish reports when tar is unavailable', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /tar is required to inspect release artifacts on this runner/);
+});
+
+test('npm-only publish reports when fetch is unavailable', () => {
+  const { artifacts } = createArtifacts('0.2.0');
+  const bootstrap = `
+    globalThis.fetch = undefined;
+    process.argv = [
+      'node',
+      ${JSON.stringify(publishScript)},
+      '--npm-only',
+      '--version',
+      '0.2.0',
+      '--artifacts',
+      ${JSON.stringify(artifacts)},
+    ];
+    await import(${JSON.stringify(publishScriptUrl)});
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_AUTH_TOKEN: 'test-token' },
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Global fetch is required for registry preflight; run this script with Node\.js 18 or newer/);
 });
