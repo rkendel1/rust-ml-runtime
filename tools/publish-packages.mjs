@@ -101,6 +101,9 @@ async function main() {
   if (nodeRoot.version !== version) throw new Error(`${nodeRoot.name} is ${nodeRoot.version}; expected ${version}`);
   const optionalDependencies = nodeRoot.optionalDependencies ?? {};
   const expectedPlatformPackages = Object.keys(optionalDependencies).map((name) => {
+    if (optionalDependencies[name] !== version) {
+      throw new Error(`${nodeRoot.name} pins ${name} to ${optionalDependencies[name]}; expected ${version}`);
+    }
     if (!name.startsWith(`${nodeRoot.name}-`)) {
       throw new Error(`Unexpected optional dependency ${name}; expected ${nodeRoot.name}-<platform>`);
     }
