@@ -75,7 +75,10 @@ async function main() {
     throw new Error(`Release artifact directory not found: ${artifacts}. Pass --artifacts PATH after downloading the release build artifacts`);
   }
 
-  const npmTarballs = collect(artifacts, (path) => path.endsWith('.tgz')).sort();
+  const npmTarballs = collect(
+    artifacts,
+    (path) => path.endsWith('.tgz') && basename(path).startsWith('rust-ml-runtime-node-'),
+  ).sort();
   const versionPattern = escapeRegExp(version);
   const rootPattern = new RegExp(`rust-ml-runtime-node-${versionPattern}\\.tgz$`);
   const rootPackages = npmTarballs.filter((path) => rootPattern.test(path));
