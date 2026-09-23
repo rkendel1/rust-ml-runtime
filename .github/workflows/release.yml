@@ -183,10 +183,12 @@ jobs:
           set -euo pipefail
           version="${RELEASE_VERSION##*/}"
           version="${version#v}"
-          root_package="$(find artifacts/macos-aarch64 -name "rust-ml-runtime-node-${version}.tgz" -print -quit)"
-          native_package="$(find artifacts/linux-x86_64 -name "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz" -print -quit)"
+          root_package="$(find "$GITHUB_WORKSPACE/artifacts/macos-aarch64" -name "rust-ml-runtime-node-${version}.tgz" -print -quit)"
+          native_package="$(find "$GITHUB_WORKSPACE/artifacts/linux-x86_64" -name "rust-ml-runtime-node-linux-x64-gnu-${version}.tgz" -print -quit)"
           test -n "$root_package"
           test -n "$native_package"
+          test -f "$root_package"
+          test -f "$native_package"
           project="$(mktemp -d)"
           cd "$project"
           npm init -y >/dev/null
