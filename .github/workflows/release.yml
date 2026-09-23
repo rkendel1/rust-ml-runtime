@@ -33,7 +33,7 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: candidate="${RELEASE_VERSION##*/}"; node tools/check-package-versions.mjs "${candidate#v}"
       - run: node tools/check-release-boundary.mjs
-      - run: node --test bindings/node/test/loader.test.cjs
+      - run: node --test bindings/node/test/loader.test.cjs tools/publish-packages.test.mjs
       - run: npm pack --dry-run
         working-directory: bindings/node
 
