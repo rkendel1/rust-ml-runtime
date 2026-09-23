@@ -42,7 +42,9 @@ const ensureCommandAvailable = (command) => {
   try {
     execFileSync(command, ['--version'], { stdio: 'ignore' });
   } catch (error) {
-    if (error?.code === 'ENOENT') throw new Error(`${command} is required to inspect release artifacts on this runner`);
+    if (error?.code === 'ENOENT' || error?.cause?.code === 'ENOENT') {
+      throw new Error(`${command} is required to inspect release artifacts on this runner`);
+    }
     throw error;
   }
 };
