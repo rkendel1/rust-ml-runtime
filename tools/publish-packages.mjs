@@ -132,9 +132,10 @@ async function main() {
   }
   const userAgent = 'rust-ml-runtime-release (github.com/rkendel1/rust-ml-runtime)';
   const registryHeaders = { 'user-agent': userAgent };
-  if (process.env.NODE_AUTH_TOKEN) registryHeaders.authorization = 'Bearer ' + process.env.NODE_AUTH_TOKEN;
-  const exists = async (url) => {
-    const response = await fetch(url, { headers: registryHeaders });
+  const npmRegistryHeaders = { ...registryHeaders };
+  if (process.env.NODE_AUTH_TOKEN) npmRegistryHeaders.authorization = 'Bearer ' + process.env.NODE_AUTH_TOKEN;
+  const exists = async (url, headers = registryHeaders) => {
+    const response = await fetch(url, { headers });
     if (response.status === 404) return false;
     if (!response.ok) throw new Error(`Registry preflight failed (${response.status}) for ${url}`);
     return true;
@@ -148,7 +149,7 @@ async function main() {
   }
   for (const name of [nodeRoot.name, ...Object.keys(optionalDependencies)]) {
     const encoded = encodeURIComponent(name).replace(/%2F/gi, '%2f');
-    if (await exists(`https://registry.npmjs.org/${encoded}/${version}`)) {
+    if (await exists(`https://registry.npmjs.org/${encoded}/${version}`, npmRegistryHeaders)) {
       throw new Error(`${name}@${version} already exists on npm; refusing a duplicate coordinated release`);
     }
   }
