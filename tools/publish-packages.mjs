@@ -46,8 +46,8 @@ async function main() {
   const artifacts = valueAfter('--artifacts', 'artifacts');
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Pass --version X.Y.Z or set RELEASE_VERSION');
 
-  const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], { encoding: 'utf8' }));
   if (!npmOnly) {
+    const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], { encoding: 'utf8' }));
     for (const name of crateOrder) {
       const pkg = metadata.packages.find((candidate) => candidate.name === name);
       if (!pkg) throw new Error(`Missing publishable crate ${name}`);
