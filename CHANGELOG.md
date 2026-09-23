@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Hardened published Node native binding resolution and diagnostics.
+- Added npm artifact validation and clean Linux optional-dependency coverage.
+- Added native runtime self-test reporting for Node consumers.
+
 ## 0.1.0
 
 - First Python-free native release of the `ml-runtime` CLI and Rust runtime.
