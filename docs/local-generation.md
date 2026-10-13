@@ -79,7 +79,8 @@ the server yourself.
 
 ```text
 # Start Uzu (model acquisition is Uzu's job; the runtime never downloads weights)
-uzu-cli server --model <model-id-or-local-dir> --host 127.0.0.1 --port 8000
+# (from a checkout of uzu; the binary is the `cli` package, built with the capability-grammar feature for JSON constraints)
+cargo run --release -p cli -- server --model <model-id-or-local-dir> --host 127.0.0.1 --port 8000
 
 # Use it from rust-ml-runtime
 ml-runtime chat --provider openai-compatible --endpoint http://127.0.0.1:8000/v1 \
