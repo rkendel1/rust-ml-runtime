@@ -1,6 +1,6 @@
 [package]
 name = "ml-runtime-llama-provider"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Embedded llama.cpp (GGUF) generation provider for rust-ml-runtime (spike)"
@@ -14,8 +14,8 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-ml-runtime-common = { version = "0.2.3", path = "../../crates/common" }
-ml-runtime-provider = { version = "0.2.3", path = "../../crates/provider" }
+ml-runtime-common = { version = "0.3.0", path = "../../crates/common" }
+ml-runtime-provider = { version = "0.3.0", path = "../../crates/provider" }
 # `common` provides JSON-schema -> GBNF grammar conversion. `openmp` is left off
 # on purpose: it would add a runtime libgomp dependency to the native addon.
 llama-cpp-2 = { version = "=0.1.159", default-features = false, features = ["common"] }

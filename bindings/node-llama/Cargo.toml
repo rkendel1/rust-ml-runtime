@@ -1,6 +1,6 @@
 [package]
 name = "ml-runtime-node-llama"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Opt-in Node-API addon that embeds llama.cpp local generation (packaging probe)"

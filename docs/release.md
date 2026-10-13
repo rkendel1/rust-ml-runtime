@@ -31,7 +31,7 @@ crates for crates.io. Rust applications install only the public crate:
 
 ```toml
 [dependencies]
-rust-ml-runtime = "0.2.3"
+rust-ml-runtime = "0.3.0"
 ```
 
 CLI, Node, benchmark, server-integration, and placeholder backend workspace

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.0
+
+- Qualified the opt-in embedded llama.cpp provider (`providers/llama`) on Apple
+  Silicon and Bookworm Linux. It is **not** published and not part of this
+  release; see `docs/embedded-generation.md`.
+
 - Added provider-mediated tool calling to generative inference: tool
   definitions, `ToolChoice`, tool-call proposals on assistant messages, and
   tool-result messages, over the OpenAI-compatible adapter, including streaming
