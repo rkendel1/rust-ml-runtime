@@ -8,7 +8,7 @@ use ml_runtime_http_provider::HttpProvider;
 use ml_runtime_inference::InferenceChunk;
 use ml_runtime_model::{CatalogError, ModelCatalog, ModelHandle};
 use ml_runtime_onnx_backend::OnnxBackend;
-use ml_runtime_provider::{GenerationProvider, Provider, ProviderCapability};
+use ml_runtime_provider::{Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -68,8 +68,8 @@ pub use ml_runtime_provider;
 pub use ml_runtime_provider::{
     ChatMessage, ChatMetadata, ChatRequest, ChatResponse, ChatRole, ChatStreamEvent,
     ChatStreamSummary, ExecutionLocation, FinishReason, GenerationCapabilities,
-    GenerationModelInfo, GenerationOptions, ResponseFormat, StructuredOutput, ToolCall, ToolChoice,
-    ToolDefinition, Usage,
+    GenerationModelInfo, GenerationOptions, GenerationProvider, ResponseFormat, StructuredOutput,
+    ToolCall, ToolChoice, ToolDefinition, Usage,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
