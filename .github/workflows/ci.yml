@@ -34,6 +34,29 @@ jobs:
         env:
           RUSTFLAGS: ""
 
+  # Opt-in local inference (llama.cpp). Kept out of the matrix above: it needs
+  # CMake, a C++ compiler and libclang, and compiles llama.cpp. Uses generated
+  # fixtures only; it never downloads model weights.
+  local-engine:
+    name: local engine (synthetic fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: node --test tools/check-local-engine-isolation.test.mjs
+      - run: node tools/check-local-engine-isolation.mjs
+      - run: cargo fmt --check
+        working-directory: providers/llama
+      - run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: providers/llama
+      - run: cargo test --locked
+        working-directory: providers/llama
+      - run: cargo build --locked --release
+        working-directory: bindings/node-llama
+
   codeql:
     name: CodeQL
     runs-on: ubuntu-latest

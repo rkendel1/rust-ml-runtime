@@ -184,7 +184,10 @@ pub fn write_synthetic_gguf(path: &Path, spec: &SyntheticSpec) -> io::Result<()>
     }
     let vocab = tokens.len() as u64;
     let (embd, ff, heads) = (spec.embd as u64, spec.ff as u64, spec.heads);
-    assert!(spec.embd.is_multiple_of(heads), "embd must divide evenly by heads");
+    assert!(
+        spec.embd.is_multiple_of(heads),
+        "embd must divide evenly by heads"
+    );
 
     let mut rng = Rng(spec.seed.max(1) | 1);
     let mut tensors: Vec<Tensor> = Vec::new();

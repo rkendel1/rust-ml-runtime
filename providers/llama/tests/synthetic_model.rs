@@ -199,7 +199,18 @@ fn model_loading_failures_are_distinct() {
             .collect()
     });
     right.threads = Some(1);
+    right.context_tokens = 512;
+    right.max_output_tokens = 256;
     LlamaProvider::new(right).unwrap();
+
+    // A context window beyond what the model was trained for is refused, not silently degraded.
+    let mut too_long = LlamaConfig::new(&good, "m");
+    too_long.context_tokens = 4096;
+    too_long.max_output_tokens = 256;
+    assert!(matches!(
+        LlamaProvider::new(too_long).unwrap_err(),
+        RuntimeError::InvalidRequest { reason } if reason.contains("trained context")
+    ));
 
     // Configuration validation.
     for bad in [
@@ -578,5 +589,28 @@ async fn the_loaded_model_outlives_the_provider_while_a_stream_uses_it() {
     assert!(
         completed,
         "the in-flight request keeps the model alive and finishes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_blocking_chat_future_stops_generation_and_frees_the_slot() {
+    let rt = runtime(provider(&no_eos()));
+    // The future is dropped by the timeout long before 256 tokens finish.
+    let long = request(256);
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(30),
+        rt.chat(PROVIDER_NAME, long, None),
+    )
+    .await;
+    assert!(
+        timed_out.is_err(),
+        "the request was expected to outlive the timeout"
+    );
+    let started = std::time::Instant::now();
+    rt.chat(PROVIDER_NAME, request(1), None).await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "slot was not released promptly: {:?}",
+        started.elapsed()
     );
 }
