@@ -84,5 +84,11 @@ An abbreviated result looks like:
 }
 ```
 
+## Generative inference
+
+`GenerativeML` exposes chat completion and streaming against an explicitly
+configured OpenAI-compatible endpoint, with transport and credentials owned by
+the native addon. See [Generative inference](generation.md#node-and-typescript).
+
 The Node-API addon loads the native runtime in-process. It does not spawn the
 CLI and needs no Python, Rust, Cargo, pip, or source checkout at runtime.

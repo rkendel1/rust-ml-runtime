@@ -183,3 +183,147 @@ export class LocalML {
   explainDecision(request: LocalMLDecisionGraphRequest): DecisionExecutionPlan;
   executeGraph(request: LocalMLDecisionGraphRequest): Promise<LocalMLDecisionResult>;
 }
+
+// ---- Generative inference (OpenAI-compatible endpoints) --------------------------
+
+export type ChatRole = "system" | "user" | "assistant";
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export type ResponseFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | { type: "json_schema"; name: string; schema: unknown; strict?: boolean };
+
+export interface GenerationOptions {
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  stop?: string[];
+  seed?: number;
+  response_format?: ResponseFormat;
+}
+
+export interface ChatRequest {
+  /** Explicit model identity. The runtime never substitutes another model. */
+  model: string;
+  messages: ChatMessage[];
+  options?: GenerationOptions;
+}
+
+/** `null`/absent means the provider did not report it; nothing is estimated. */
+export type FinishReason = "stop" | "length" | "content_filter" | { other: string };
+
+export interface Usage {
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+}
+
+/** Execution evidence recorded by the runtime, never by the model. */
+export interface ChatMetadata {
+  provider: string;
+  transport: string;
+  execution: "local" | "remote";
+  /** True when `execution` was inferred from a loopback host, not configured. */
+  execution_inferred: boolean;
+  /** Endpoint without credentials, query, or fragment. */
+  endpoint: string;
+  requested_model: string;
+  reported_model: string | null;
+  response_id: string | null;
+  streamed: boolean;
+  stream_events: number | null;
+  time_to_first_token: { secs: number; nanos: number } | null;
+  duration: { secs: number; nanos: number };
+  runtime_version: string;
+}
+
+/**
+ * Present only when a JSON response format was requested. Generated text is
+ * returned verbatim; invalid output is reported, never repaired.
+ */
+export type StructuredOutput =
+  | { status: "validated"; value: unknown }
+  | { status: "invalid_json"; error: string }
+  | { status: "schema_violation"; errors: string[] };
+
+export interface ChatResponse {
+  message: ChatMessage;
+  finish_reason: FinishReason | null;
+  usage: Usage | null;
+  metadata: ChatMetadata;
+  structured: StructuredOutput | null;
+}
+
+export interface ChatStreamSummary {
+  finish_reason: FinishReason | null;
+  usage: Usage | null;
+  metadata: ChatMetadata;
+  structured: StructuredOutput | null;
+}
+
+export type ChatStreamEvent =
+  | { type: "started"; provider: string; model: string }
+  | { type: "delta"; content: string }
+  | ({ type: "completed" } & ChatStreamSummary);
+
+export interface GenerationModelInfo {
+  id: string;
+  owned_by: string | null;
+}
+
+export interface GenerativeMLOptions {
+  /** Base URL including the API prefix, e.g. `http://127.0.0.1:11434/v1`. */
+  endpoint: string;
+  /** Bearer token. Prefer `apiKeyEnv`; set at most one of the two. */
+  apiKey?: string;
+  /** Name of an environment variable holding the bearer token. */
+  apiKeyEnv?: string;
+  /** Explicit classification; loopback hosts are otherwise reported as local. */
+  location?: "local" | "remote";
+  /** Optional features cannot be discovered, so structured output must be declared. */
+  capabilities?: {
+    streaming?: boolean;
+    stopSequences?: boolean;
+    seed?: boolean;
+    jsonObject?: boolean;
+    jsonSchema?: boolean;
+  };
+  connectTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  streamIdleTimeoutMs?: number;
+}
+
+export type GenerationErrorCode =
+  | "invalid_request" | "model_not_found" | "provider_unavailable" | "capability_mismatch"
+  | "resource_limit" | "timeout" | "cancelled" | "transport" | "protocol" | "execution"
+  | "native" | string;
+
+export class GenerationError extends Error {
+  /** Stable machine-readable category matching the Rust `RuntimeError` variant. */
+  code: GenerationErrorCode;
+}
+
+/**
+ * Streams `started`, zero or more `delta`, then one `completed` event. Errors
+ * and cancellation reject the iteration and never produce `completed`.
+ * Breaking out of the loop closes the stream.
+ */
+export class ChatStream implements AsyncIterable<ChatStreamEvent> {
+  [Symbol.asyncIterator](): AsyncGenerator<ChatStreamEvent, void, undefined>;
+  /** Stops the request and releases the upstream connection. Idempotent. */
+  close(): void;
+  cancel(): void;
+}
+
+export class GenerativeML {
+  constructor(options: GenerativeMLOptions);
+  static create(options: GenerativeMLOptions): Promise<GenerativeML>;
+  chat(request: ChatRequest, options?: { cancellation?: DecisionCancellation }): Promise<ChatResponse>;
+  chatStream(request: ChatRequest, options?: { cancellation?: DecisionCancellation }): ChatStream;
+  listModels(options?: { cancellation?: DecisionCancellation }): Promise<GenerationModelInfo[]>;
+}

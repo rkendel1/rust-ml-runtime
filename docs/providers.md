@@ -8,6 +8,11 @@ Current boundaries:
 - `remote` HTTP: boundary for remote APIs
 - `server`: boundary for self-hosted daemons or socket-based services
 
+Generative providers implement the separate `GenerationProvider` trait and are
+registered with `register_generation_provider`. The built-in `openai-compatible`
+provider reports `transport = http` and an explicit `local` or `remote`
+execution location. See [Generative inference](generation.md).
+
 Providers expose capability metadata so applications can inspect remote support without assuming identical semantics across transports.
 # Capability providers
 

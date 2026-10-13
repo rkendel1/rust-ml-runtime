@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Added a generative inference contract (`ChatRequest`, `ChatResponse`,
+  `ChatStreamEvent`, `GenerationProvider`) alongside, and independent of, typed
+  inference, with `Runtime::chat` and `Runtime::chat_stream`.
+- Added an OpenAI-compatible HTTP provider (chat completions, SSE streaming,
+  model listing) for local servers such as Ollama and remote services, with
+  explicit provider/model selection, bounded buffering, timeouts, cancellation,
+  and credential redaction. There is no routing or fallback.
+- Added explicit structured-output validation (`Validated`, `InvalidJson`,
+  `SchemaViolation`) using `jsonschema` without default features.
+- Added `ml-runtime chat` and the `GenerativeML` Node/TypeScript API.
+- Typed inference, model lifecycle, and the `/v1/infer*` protocol are unchanged.
+
 ## 0.2.3
 
 - Added explicit structured-decision capabilities that keep model architecture,

@@ -105,9 +105,10 @@ Developer documentation is organized from usage toward implementation:
 3. [Release process](docs/release.md)
 4. [Models and lifecycle](docs/models.md)
 5. [Core API](docs/api.md#quickstart)
-6. [Architecture](docs/architecture.md)
-7. [Structured-decision planning](docs/runtime/execution-planning.md)
-8. [Agent integration contract](docs/AGENTS.md)
+6. [Generative inference (OpenAI-compatible)](docs/generation.md)
+7. [Architecture](docs/architecture.md)
+8. [Structured-decision planning](docs/runtime/execution-planning.md)
+9. [Agent integration contract](docs/AGENTS.md)
 
 ## Public architecture
 
@@ -210,7 +211,8 @@ be unavailable or experimental depending on the build. Check
 Commands use explicit `--models`, `--endpoint`, `--backend`, and `--provider`
 options. No daemon or telemetry service is required. Exit code `0` means
 success, `1` means a runtime/application failure, and `2` means invalid CLI
-usage. `--json` changes output only, not exit-code semantics.
+usage. `--json` changes output only, not exit-code semantics. `ml-runtime chat`
+additionally returns `3` when requested structured output did not validate.
 
 See `docs/architecture.md`, `docs/models.md`, and `docs/bindings.md` for deeper
 implementation details.

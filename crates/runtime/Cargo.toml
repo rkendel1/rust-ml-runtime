@@ -40,3 +40,7 @@ reqwest.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+jsonschema = { version = "0.58.6", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "net"] }
