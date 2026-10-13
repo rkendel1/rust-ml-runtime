@@ -1,4 +1,4 @@
-# rust-ml-runtime 0.2.3
+# rust-ml-runtime 0.3.0
 
 A native, architecture-aware local ML runtime for applications without Python.
 
@@ -9,6 +9,12 @@ or batched plan from factual model/backend capabilities. The same API operates
 over Laya Core ML on macOS and Laya ONNX on Linux.
 
 ## Included
+
+- Generative inference: `Runtime::chat` / `chat_stream`, OpenAI-compatible provider,
+  structured-output validation, tool-call proposals (never executed), and the
+  `GenerativeML` Node/TypeScript API. Rust source impacts are listed in CHANGELOG.md
+  (new enum variants and struct fields). Typed inference is unchanged.
+- The embedded llama.cpp provider is opt-in, unpublished, and not in this release
 
 - Explicit model architecture, backend, device, batch, async, cancellation,
   and parallel-execution capabilities
@@ -21,7 +27,7 @@ over Laya Core ML on macOS and Laya ONNX on Linux.
 - Factual execution diagnostics with actual batches, concurrency, and skipped work
 - Runtime benchmarks for single, serial, selective, parallel, batch, and cancellation paths
 - Typed `@rust-ml-runtime/node` capability and planning APIs
-- Rust library distribution through `rust-ml-runtime = "0.2.3"` on crates.io
+- Rust library distribution through `rust-ml-runtime = "0.3.0"` on crates.io
 - Explicit model installation, verification, diagnosis, and removal
 - SHA-256 verification for runtime and model artifacts
 - Local Core ML execution with READY/offline lifecycle semantics

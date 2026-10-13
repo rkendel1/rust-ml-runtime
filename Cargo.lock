@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "ml-runtime-common",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-benchmarks"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "ml-runtime-cpu-backend",
  "ml-runtime-model",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-cli"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-common"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "futures-core",
  "thiserror",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-coreml-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-cpu-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-cuda-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-http-provider"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-inference"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "ml-runtime-model",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-local-provider"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "ml-runtime-common",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-model"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-node"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "napi",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-onnx-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-protocol"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "ml-runtime-inference",
  "ml-runtime-model",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-provider"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "ml-runtime-common",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-server-provider"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "ml-runtime-webgpu-backend"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "rust-ml-runtime"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-core",

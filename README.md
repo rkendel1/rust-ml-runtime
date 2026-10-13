@@ -31,7 +31,7 @@ Rust applications use the public crate:
 
 ```toml
 [dependencies]
-rust-ml-runtime = "0.2.3"
+rust-ml-runtime = "0.3.0"
 ```
 
 Node applications use the platform-selecting package:
@@ -148,7 +148,7 @@ provider. Sensitive capabilities fail closed unless an application supplies its
 authorization hook and explicit resource policy. Providers can be added behind
 the runtime's capability boundary without changing application code.
 
-The CLI and Rust API use the workspace version (`0.2.3` currently), exposed by
+The CLI and Rust API use the workspace version (`0.3.0` currently), exposed by
 `ml-runtime --version` and `CARGO_PKG_VERSION`. The wire protocol is `/v1`;
 supported routes are `/v1/health`, `/v1/capabilities`, `/v1/models`,
 `/v1/infer`, and `/v1/infer/stream`. Protocol versions are independent of
