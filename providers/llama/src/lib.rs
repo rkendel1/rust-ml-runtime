@@ -104,7 +104,14 @@ pub struct LoadedModelInfo {
     pub parameters: u64,
     pub file_bytes: u64,
     pub train_context: u32,
+    /// Time to hash the file for `expected_sha256` (zero when not requested).
+    pub verify_time: Duration,
+    /// Time inside llama.cpp's loader. With mmap this is metadata
+    /// initialization, not weight reads; weights page in on first use.
     pub load_time: Duration,
+    /// ggml devices compiled into this build (name, backend, description).
+    /// Presence here does not mean a layer runs there: see `gpu_layers`.
+    pub devices: Vec<String>,
 }
 
 pub struct LlamaProvider {
@@ -139,8 +146,12 @@ fn backend() -> RuntimeResult<&'static LlamaBackend> {
         .get_or_init(|| {
             LlamaBackend::init()
                 .map(|mut backend| {
-                    // llama.cpp logs to stderr by default; keep the host quiet.
-                    backend.void_logs();
+                    // llama.cpp logs to stderr by default; keep the host quiet
+                    // unless asked (ML_RUNTIME_LLAMA_LOGS=1) to see which device
+                    // each layer was assigned to.
+                    if std::env::var_os("ML_RUNTIME_LLAMA_LOGS").is_none() {
+                        backend.void_logs();
+                    }
                     backend
                 })
                 .map_err(|e| e.to_string())
@@ -225,6 +236,7 @@ impl LlamaProvider {
                 reason: "not a GGUF file (llama.cpp loads GGUF only)".to_owned(),
             });
         }
+        let verify_started = Instant::now();
         if let Some(expected) = &config.expected_sha256 {
             let actual = sha256_hex(&config.model_path)
                 .map_err(|e| unavailable(format!("cannot hash model file: {e}")))?;
@@ -235,6 +247,8 @@ impl LlamaProvider {
                 });
             }
         }
+
+        let verify_time = verify_started.elapsed();
 
         let backend = backend()?;
         let started = Instant::now();
@@ -262,8 +276,19 @@ impl LlamaProvider {
             parameters: model.n_params(),
             file_bytes: metadata.len(),
             train_context: model.n_ctx_train(),
+            verify_time,
             load_time: started.elapsed(),
+            devices: llama_cpp_2::list_llama_ggml_backend_devices()
+                .into_iter()
+                .map(|d| format!("{} [{}] {}", d.name, d.backend, d.description))
+                .collect(),
         };
+        if config.context_tokens > info.train_context {
+            return Err(invalid(&format!(
+                "context_tokens {} exceeds the model's trained context of {}",
+                config.context_tokens, info.train_context
+            )));
+        }
         let template = config.chat_template.clone().or_else(|| {
             model
                 .chat_template(None)
@@ -282,6 +307,13 @@ impl LlamaProvider {
                 context_creation: Mutex::new(()),
             }),
         })
+    }
+
+    /// The exact prompt text the chat template produces for `messages`
+    /// (including the trailing assistant turn opener). Diagnostic: it is what
+    /// generation tokenizes.
+    pub fn render_prompt(&self, messages: &[ChatMessage]) -> RuntimeResult<String> {
+        self.inner.build_prompt(messages)
     }
 
     pub fn model_info(&self) -> &LoadedModelInfo {
@@ -485,7 +517,7 @@ impl Inner {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.subsec_nanos())
                     },
-                    |s| s as u32,
+                    |s| (s ^ (s >> 32)) as u32,
                 );
                 chain.push(LlamaSampler::dist(seed));
             }
@@ -527,6 +559,11 @@ impl Inner {
                 ),
             });
         }
+        if tokens.is_empty() {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "the prompt produced no tokens".to_owned(),
+            });
+        }
         let mut sampler = self.sampler(request)?;
         if cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -536,8 +573,14 @@ impl Inner {
             .with_n_ctx(NonZeroU32::new(self.config.context_tokens))
             .with_n_batch(self.config.batch_tokens)
             .with_n_ubatch(self.config.batch_tokens);
+        if self.config.gpu_layers == 0 {
+            // Without this, llama.cpp's scheduler still moves large-batch
+            // (prompt) matmuls to a compiled-in accelerator, so "CPU only"
+            // would not be CPU only.
+            params = params.with_op_offload(false);
+        }
         if let Some(threads) = self.config.threads {
-            params = params.with_n_threads(threads);
+            params = params.with_n_threads(threads).with_n_threads_batch(threads);
         }
         let mut ctx = {
             let _guard = self
@@ -685,6 +728,16 @@ async fn admit(
     })
 }
 
+/// A token cancelled by the caller's token or when the returned guard drops.
+fn linked(
+    outer: &Option<CancellationToken>,
+) -> (Option<CancellationToken>, tokio_util::sync::DropGuard) {
+    let token = outer
+        .as_ref()
+        .map_or_else(CancellationToken::new, CancellationToken::child_token);
+    (Some(token.clone()), token.drop_guard())
+}
+
 type EventSender = mpsc::Sender<RuntimeResult<ChatStreamEvent>>;
 
 /// Delivers an event, applying backpressure but never blocking past
@@ -736,6 +789,7 @@ impl GenerationProvider for LlamaProvider {
             notes: vec![
                 backend,
                 format!("llama-cpp-2 {}", "0.1.159"),
+                format!("ggml devices: {}", self.inner.info.devices.join("; ")),
                 "cancellation is observed between tokens and prompt chunks".to_owned(),
             ],
         }
@@ -777,6 +831,9 @@ impl GenerationProvider for LlamaProvider {
         self.inner.check_model(&request.model)?;
         let permit = admit(&self.inner.admission, &cancellation).await?;
         let inner = self.inner.clone();
+        // Dropping this future (a caller timeout, say) must stop the blocking
+        // generation too, not leave it holding a slot until max_tokens.
+        let (cancellation, _guard) = linked(&cancellation);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let started = Instant::now();
@@ -812,6 +869,7 @@ impl GenerationProvider for LlamaProvider {
         let permit = admit(&self.inner.admission, &cancellation).await?;
         let (sender, receiver) = mpsc::channel(self.inner.config.stream_buffer);
         let inner = self.inner.clone();
+        let (cancellation, guard) = linked(&cancellation);
         // One OS thread's worth of work per request, held under the admission
         // permit. It ends when generation ends, the consumer drops the stream,
         // or the token is cancelled; it cannot outlive an abandoned stream by
@@ -852,8 +910,13 @@ impl GenerationProvider for LlamaProvider {
             };
             let _ = deliver(&sender, &cancellation, last);
         });
+        // Dropping the stream cancels the generation, even while it is busy
+        // with the prompt or a grammar that emits no text.
         let stream: BoxStream<RuntimeResult<ChatStreamEvent>> =
-            Box::pin(ReceiverStream::new(receiver).map(|item| item));
+            Box::pin(ReceiverStream::new(receiver).map(move |item| {
+                let _ = &guard;
+                item
+            }));
         Ok(stream)
     }
 }

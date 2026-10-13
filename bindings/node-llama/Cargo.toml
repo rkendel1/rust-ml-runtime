@@ -1,0 +1,33 @@
+[package]
+name = "ml-runtime-node-llama"
+version = "0.2.3"
+edition = "2021"
+license = "MIT"
+description = "Opt-in Node-API addon that embeds llama.cpp local generation (packaging probe)"
+build = "build.rs"
+# Not published and not in the release tooling: this crate exists to prove (or
+# disprove) that embedded local inference can be built and shipped to Node.
+publish = false
+
+# Standalone workspace: the repository workspace, its `--all-features` gates and
+# the shipped `ml-runtime-node` addon never compile llama.cpp.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ml-runtime = { package = "rust-ml-runtime", path = "../../crates/runtime" }
+ml-runtime-llama-provider = { path = "../../providers/llama" }
+napi = { version = "3", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Thin LTO across the napi glue and the provider; llama.cpp itself is C++ and
+# unaffected.
+lto = "thin"
