@@ -11,10 +11,14 @@ use jsonschema::Validator;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
 use ml_runtime_provider::{
     ChatRequest, ChatResponse, ChatStreamEvent, GenerationModelInfo, GenerationProvider,
-    ProviderCapability, ResponseFormat, StructuredOutput, DEFAULT_MAX_OUTPUT_BYTES,
+    ProviderCapability, ResponseFormat, StructuredOutput, ToolCall, ToolChoice, ToolDefinition,
+    DEFAULT_MAX_OUTPUT_BYTES,
 };
 use serde_json::Value;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use tokio::sync::OwnedSemaphorePermit;
 
 const MAX_REPORTED_VIOLATIONS: usize = 16;
@@ -75,6 +79,78 @@ impl OutputCheck {
                 }
             }
         }
+    }
+}
+
+/// Validates tool-call *proposals* against the definitions the caller offered.
+/// A schema constrains arguments; passing it grants no authority and does not
+/// mean the operation ran.
+struct ToolChecks {
+    validators: BTreeMap<String, Validator>,
+    choice: Option<ToolChoice>,
+}
+
+impl ToolChecks {
+    /// Compiles every tool schema up front so an unusable one is an
+    /// `InvalidRequest` before anything is sent.
+    fn compile(tools: &[ToolDefinition], choice: &Option<ToolChoice>) -> RuntimeResult<Self> {
+        let mut validators = BTreeMap::new();
+        for tool in tools {
+            let validator = jsonschema::validator_for(&tool.input_schema).map_err(|error| {
+                RuntimeError::InvalidRequest {
+                    reason: format!(
+                        "unusable input schema for tool {:?}: {}",
+                        tool.name,
+                        clip(&error.to_string())
+                    ),
+                }
+            })?;
+            validators.insert(tool.name.clone(), validator);
+        }
+        Ok(Self {
+            validators,
+            choice: choice.clone(),
+        })
+    }
+
+    fn check(&self, calls: &[ToolCall]) -> RuntimeResult<()> {
+        let invalid = |reason: String| Err(RuntimeError::InvalidOutput { reason });
+        if calls.is_empty() {
+            return Ok(());
+        }
+        if matches!(self.choice, Some(ToolChoice::None)) {
+            return invalid("model proposed tool calls although tool_choice is none".to_owned());
+        }
+        for call in calls {
+            let Some(validator) = self.validators.get(&call.name) else {
+                return invalid(format!(
+                    "model proposed a call to undefined tool {:?}",
+                    call.name
+                ));
+            };
+            if let Some(ToolChoice::Tool { name }) = &self.choice {
+                if *name != call.name {
+                    return invalid(format!(
+                        "model proposed tool {:?} although {name:?} was required",
+                        call.name
+                    ));
+                }
+            }
+            let paths: Vec<String> = validator
+                .iter_errors(&call.arguments)
+                .take(MAX_REPORTED_VIOLATIONS)
+                .map(|error| error.instance_path().to_string())
+                .collect();
+            if !paths.is_empty() {
+                // Locations only: argument values are not echoed into errors.
+                return invalid(format!(
+                    "arguments proposed for tool {:?} violate its input schema at: {}",
+                    call.name,
+                    paths.join(", ")
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -143,10 +219,14 @@ impl Runtime {
         request.validate()?;
         let format = request.options.response_format.clone();
         let check = OutputCheck::for_format(&format)?;
+        let tools = ToolChecks::compile(&request.options.tools, &request.options.tool_choice)?;
         let provider = self.generation_provider(provider)?;
         let _permit = self.admit(&cancellation).await?;
         let mut response = provider.chat(request, cancellation).await?;
-        if let Some(check) = check {
+        tools.check(&response.message.tool_calls)?;
+        // A response that proposes tool calls is not an answer in the requested
+        // format, so it is not checked as one (`structured` stays `None`).
+        if let (Some(check), true) = (check, response.message.tool_calls.is_empty()) {
             response.structured = Some(check.check(&response.message.content, &format));
         }
         Ok(response)
@@ -166,6 +246,7 @@ impl Runtime {
         request.validate()?;
         let format = request.options.response_format.clone();
         let check = OutputCheck::for_format(&format)?;
+        let tools = ToolChecks::compile(&request.options.tools, &request.options.tool_choice)?;
         let provider = self.generation_provider(provider)?;
         let permit = self.admit(&cancellation).await?;
         let inner = provider.chat_stream(request, cancellation.clone()).await?;
@@ -175,6 +256,11 @@ impl Runtime {
             // Text is retained only when it must be validated, and is bounded.
             accumulated: Option<String>,
             check: Option<OutputCheck>,
+            tools: ToolChecks,
+            // Proposals are held until the whole response validates, so a
+            // consumer never sees a partial set.
+            held: Vec<ToolCall>,
+            outbox: VecDeque<RuntimeResult<ChatStreamEvent>>,
             format: ResponseFormat,
             cancellation: Option<CancellationToken>,
             completed: bool,
@@ -185,6 +271,9 @@ impl Runtime {
             inner,
             accumulated: check.is_some().then(String::new),
             check,
+            tools,
+            held: Vec::new(),
+            outbox: VecDeque::new(),
             format,
             cancellation,
             completed: false,
@@ -194,55 +283,79 @@ impl Runtime {
         Ok(Box::pin(futures_util::stream::unfold(
             state,
             |mut s| async move {
-                if s.finished {
-                    return None;
-                }
-                let item = match s.inner.next().await {
-                    Some(Ok(ChatStreamEvent::Delta { content })) => {
-                        if let Some(text) = &mut s.accumulated {
-                            if text.len() + content.len() > DEFAULT_MAX_OUTPUT_BYTES {
-                                s.finished = true;
-                                return Some((
-                                    Err(RuntimeError::ResourceLimit {
-                                        reason: "structured output exceeds the validation buffer"
-                                            .to_owned(),
-                                    }),
-                                    s,
-                                ));
-                            }
-                            text.push_str(&content);
-                        }
-                        Ok(ChatStreamEvent::Delta { content })
+                loop {
+                    if let Some(item) = s.outbox.pop_front() {
+                        return Some((item, s));
                     }
-                    Some(Ok(ChatStreamEvent::Completed(mut summary))) => {
-                        if let (Some(check), Some(text)) = (&s.check, &s.accumulated) {
-                            summary.structured = Some(check.check(text, &s.format));
-                        }
-                        s.completed = true;
-                        s.finished = true;
-                        Ok(ChatStreamEvent::Completed(summary))
+                    if s.finished {
+                        return None;
                     }
-                    Some(Ok(event)) => Ok(event),
-                    Some(Err(error)) => {
-                        s.finished = true;
-                        Err(error)
-                    }
-                    None if s.completed => return None,
-                    None => {
-                        s.finished = true;
-                        Err(
-                            if s.cancellation.as_ref().is_some_and(|t| t.is_cancelled()) {
-                                RuntimeError::Cancelled
-                            } else {
-                                RuntimeError::Protocol {
-                                    operation: "chat stream".to_owned(),
-                                    reason: "stream ended without completion".to_owned(),
+                    let item = match s.inner.next().await {
+                        Some(Ok(ChatStreamEvent::Delta { content })) => {
+                            if let Some(text) = &mut s.accumulated {
+                                if text.len() + content.len() > DEFAULT_MAX_OUTPUT_BYTES {
+                                    s.finished = true;
+                                    return Some((
+                                        Err(RuntimeError::ResourceLimit {
+                                            reason:
+                                                "structured output exceeds the validation buffer"
+                                                    .to_owned(),
+                                        }),
+                                        s,
+                                    ));
                                 }
-                            },
-                        )
-                    }
-                };
-                Some((item, s))
+                                text.push_str(&content);
+                            }
+                            Ok(ChatStreamEvent::Delta { content })
+                        }
+                        Some(Ok(ChatStreamEvent::ToolCallCompleted { call })) => {
+                            s.held.push(call);
+                            continue;
+                        }
+                        Some(Ok(ChatStreamEvent::Completed(mut summary))) => {
+                            s.completed = true;
+                            s.finished = true;
+                            match s.tools.check(&s.held) {
+                                Err(error) => Err(error),
+                                Ok(()) => {
+                                    if s.held.is_empty() {
+                                        if let (Some(check), Some(text)) =
+                                            (&s.check, &s.accumulated)
+                                        {
+                                            summary.structured = Some(check.check(text, &s.format));
+                                        }
+                                    }
+                                    let held = std::mem::take(&mut s.held);
+                                    s.outbox.extend(held.into_iter().map(|call| {
+                                        Ok(ChatStreamEvent::ToolCallCompleted { call })
+                                    }));
+                                    s.outbox.push_back(Ok(ChatStreamEvent::Completed(summary)));
+                                    continue;
+                                }
+                            }
+                        }
+                        Some(Ok(event)) => Ok(event),
+                        Some(Err(error)) => {
+                            s.finished = true;
+                            Err(error)
+                        }
+                        None if s.completed => return None,
+                        None => {
+                            s.finished = true;
+                            Err(
+                                if s.cancellation.as_ref().is_some_and(|t| t.is_cancelled()) {
+                                    RuntimeError::Cancelled
+                                } else {
+                                    RuntimeError::Protocol {
+                                        operation: "chat stream".to_owned(),
+                                        reason: "stream ended without completion".to_owned(),
+                                    }
+                                },
+                            )
+                        }
+                    };
+                    return Some((item, s));
+                }
             },
         )))
     }

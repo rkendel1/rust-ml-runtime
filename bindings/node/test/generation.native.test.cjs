@@ -250,3 +250,160 @@ test('many abandoned streams do not leak connections', { skip }, async () => {
     assert.ok(await eventually(() => server.state.closedStreams === 20), `closed ${server.state.closedStreams}/20`);
   } finally { server.close(); }
 });
+
+// ---- tool calling ---------------------------------------------------------------
+// The model only proposes; the tests play the application that executes.
+
+const weatherTool = {
+  name: 'get_weather',
+  description: 'Current weather',
+  input_schema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+};
+const toolOptions = (extra = {}) => ({ tools: [weatherTool], tool_choice: { type: 'auto' }, ...extra });
+const toolCapabilities = { tools: true, toolChoice: true };
+const proposalBody = (args) => JSON.stringify({
+  model: 'reported',
+  choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: args } }] }, finish_reason: 'tool_calls' }],
+});
+
+test('a complete multi-turn tool interaction, with execution owned by the caller', { skip }, async () => {
+  const server = await mock((req, res, body) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(body.messages.some((m) => m.role === 'tool') ? completion('21C and clear.') : proposalBody('{"city":"Paris"}'));
+  });
+  try {
+    const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+    const messages = [{ role: 'user', content: 'Weather in Paris?' }];
+    const proposal = await ml.chat({ model: 'm', messages, options: toolOptions() });
+    assert.equal(proposal.finish_reason, 'tool_calls');
+    assert.deepEqual(proposal.message.tool_calls, [{ id: 'call_1', name: 'get_weather', arguments: { city: 'Paris' } }]);
+
+    // Application-owned: authorize and execute the deterministic mock tool.
+    let executions = 0;
+    messages.push(proposal.message);
+    for (const call of proposal.message.tool_calls) {
+      assert.equal(call.name, 'get_weather');
+      executions += 1;
+      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ temp_c: 21 }) });
+    }
+    assert.equal(executions, 1);
+
+    const final = await ml.chat({ model: 'm', messages, options: toolOptions() });
+    assert.equal(final.message.content, '21C and clear.');
+    const [first, second] = server.requests.map((r) => r.body);
+    assert.equal(first.tools[0].function.name, 'get_weather');
+    assert.equal(first.tool_choice, 'auto');
+    assert.equal(second.messages[1].tool_calls[0].id, 'call_1');
+    assert.equal(second.messages[1].tool_calls[0].function.arguments, '{"city":"Paris"}');
+    assert.deepEqual(second.messages[2], { role: 'tool', content: '{"temp_c":21}', tool_call_id: 'call_1' });
+  } finally { server.close(); }
+});
+
+test('tool misuse and malformed proposals surface as GenerationError codes', { skip }, async () => {
+  const request = { model: 'm', messages: [{ role: 'user', content: 'x' }], options: toolOptions() };
+  const bodies = [['{"city":42}', 'invalid_output'], ['{"city":', 'invalid_output'], ['[1]', 'invalid_output']];
+  for (const [args, code] of bodies) {
+    const server = await mock((req, res) => res.end(proposalBody(args)));
+    try {
+      await assert.rejects(new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities }).chat(request), (e) => e instanceof GenerationError && e.code === code);
+    } finally { server.close(); }
+  }
+  const server = await mock((req, res) => res.end(proposalBody('{"city":"x"}')));
+  try {
+    // Not declared: rejected before anything is sent.
+    await assert.rejects(new GenerativeML({ endpoint: server.url }).chat(request), (e) => e.code === 'capability_mismatch');
+    assert.equal(server.requests.length, 0);
+    const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+    await assert.rejects(ml.chat({ ...request, messages: [{ role: 'user', content: 'x' }, { role: 'tool', content: 'r', tool_call_id: 'ghost' }] }), (e) => e.code === 'invalid_request');
+    await assert.rejects(ml.chat({ ...request, options: toolOptions({ tool_choice: { type: 'tool', name: 'nope' } }) }), (e) => e.code === 'invalid_request');
+  } finally { server.close(); }
+});
+
+function toolStream(chunks) {
+  return (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (const chunk of chunks) res.write(chunk);
+    res.end();
+  };
+}
+const delta = (d, finish = null) => sse({ choices: [{ index: 0, delta: d, finish_reason: finish }] });
+const frag = (index, id, name, args) => ({ tool_calls: [{ index, ...(id && { id }), function: { ...(name && { name }), ...(args && { arguments: args }) } }] });
+
+test('streaming exposes tool-call deltas and releases proposals only when validated', { skip }, async () => {
+  const server = await mock(toolStream([
+    delta({ content: 'Checking. ' }),
+    delta(frag(0, 'call_', 'get_', null)),
+    delta(frag(1, 'call_B', 'get_weather', '{"ci')),
+    delta(frag(0, 'A', 'weather', '{"city":')),
+    delta(frag(1, null, null, 'ty":"Rome"}')),
+    delta(frag(0, null, null, '"Oslo"}')),
+    delta({}, 'tool_calls'),
+    sse('[DONE]'),
+  ]));
+  try {
+    const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+    const events = [];
+    for await (const event of ml.chatStream({ model: 'm', messages: [{ role: 'user', content: 'x' }], options: toolOptions() })) events.push(event);
+    const types = events.map((e) => e.type);
+    assert.equal(types[0], 'started');
+    assert.equal(types.at(-1), 'completed');
+    const proposals = events.filter((e) => e.type === 'tool_call_completed').map((e) => e.call);
+    assert.deepEqual(proposals, [
+      { id: 'call_A', name: 'get_weather', arguments: { city: 'Oslo' } },
+      { id: 'call_B', name: 'get_weather', arguments: { city: 'Rome' } },
+    ]);
+    assert.ok(types.lastIndexOf('tool_call_delta') < types.indexOf('tool_call_completed'));
+    assert.equal(events.at(-1).finish_reason, 'tool_calls');
+    assert.equal(events.filter((e) => e.type === 'delta').map((e) => e.content).join(''), 'Checking. ');
+  } finally { server.close(); }
+});
+
+test('streamed proposals that fail validation reject without releasing any', { skip }, async () => {
+  const cases = [
+    [delta(frag(0, 'a', 'get_weather', '{"city":7}')), 'invalid_output'],      // schema violation (runtime)
+    [delta(frag(0, 'a', 'get_weather', '{"city":')), 'invalid_output'],         // truncated arguments
+    [delta(frag(0, 'a', 'unknown_tool', '{}')), 'invalid_output'],              // undefined tool
+    [delta(frag(0, null, 'get_weather', '{}')), 'protocol'],                    // no id
+  ];
+  for (const [first, code] of cases) {
+    const server = await mock(toolStream([first, delta({}, 'tool_calls'), sse('[DONE]')]));
+    try {
+      const seen = [];
+      await assert.rejects(async () => {
+        const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+        for await (const event of ml.chatStream({ model: 'm', messages: [{ role: 'user', content: 'x' }], options: toolOptions() })) seen.push(event.type);
+      }, (e) => e.code === code);
+      assert.ok(!seen.includes('tool_call_completed') && !seen.includes('completed'), seen.join());
+    } finally { server.close(); }
+  }
+  // Incomplete stream: no [DONE], no finish reason.
+  const server = await mock(toolStream([delta(frag(0, 'a', 'get_weather', '{"city":"x"}'))]));
+  try {
+    const seen = [];
+    await assert.rejects(async () => {
+      const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+      for await (const event of ml.chatStream({ model: 'm', messages: [{ role: 'user', content: 'x' }], options: toolOptions() })) seen.push(event.type);
+    }, (e) => e.code === 'protocol');
+    assert.ok(!seen.includes('tool_call_completed'));
+  } finally { server.close(); }
+});
+
+test('cancelling a tool-call stream aborts the upstream request', { skip }, async () => {
+  const server = await mock((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(delta(frag(0, 'a', 'get_weather', '{"ci')));
+  });
+  try {
+    const cancellation = new DecisionCancellation();
+    const ml = new GenerativeML({ endpoint: server.url, capabilities: toolCapabilities });
+    const seen = [];
+    await assert.rejects(async () => {
+      for await (const event of ml.chatStream({ model: 'm', messages: [{ role: 'user', content: 'x' }], options: toolOptions() }, { cancellation })) {
+        seen.push(event.type);
+        if (event.type === 'tool_call_delta') cancellation.cancel();
+      }
+    }, (e) => e.code === 'cancelled');
+    assert.ok(!seen.includes('tool_call_completed'));
+    assert.ok(await eventually(() => server.state.closedStreams === 1));
+  } finally { server.close(); }
+});

@@ -186,12 +186,39 @@ export class LocalML {
 
 // ---- Generative inference (OpenAI-compatible endpoints) --------------------------
 
-export type ChatRole = "system" | "user" | "assistant";
+export type ChatRole = "system" | "user" | "assistant" | "tool";
+
+/**
+ * A tool-call **proposal** made by a model. It is not evidence that anything ran,
+ * was authorized, or succeeded; the application decides whether to execute it.
+ */
+export interface ToolCall {
+  /** Provider call ID; the matching tool message echoes it as `tool_call_id`. */
+  id: string;
+  name: string;
+  /** Parsed arguments: always a JSON object, validated against the offered schema. */
+  arguments: Record<string, unknown>;
+}
 
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Proposals; only on `assistant` messages. Replay them unchanged in the next request. */
+  tool_calls?: ToolCall[];
+  /** Only on `tool` messages: the `ToolCall.id` this caller-supplied result answers. */
+  tool_call_id?: string;
 }
+
+/** A tool the model may propose to call. The runtime never executes it. */
+export interface ToolDefinition {
+  /** `[A-Za-z0-9_-]{1,64}` */
+  name: string;
+  description?: string;
+  /** JSON Schema object constraining the arguments. It grants no authority. */
+  input_schema: Record<string, unknown>;
+}
+
+export type ToolChoice = { type: "auto" } | { type: "none" } | { type: "tool"; name: string };
 
 export type ResponseFormat =
   | { type: "text" }
@@ -205,6 +232,8 @@ export interface GenerationOptions {
   stop?: string[];
   seed?: number;
   response_format?: ResponseFormat;
+  tools?: ToolDefinition[];
+  tool_choice?: ToolChoice;
 }
 
 export interface ChatRequest {
@@ -215,7 +244,7 @@ export interface ChatRequest {
 }
 
 /** `null`/absent means the provider did not report it; nothing is estimated. */
-export type FinishReason = "stop" | "length" | "content_filter" | { other: string };
+export type FinishReason = "stop" | "length" | "content_filter" | "tool_calls" | { other: string };
 
 export interface Usage {
   prompt_tokens: number | null;
@@ -269,6 +298,16 @@ export interface ChatStreamSummary {
 export type ChatStreamEvent =
   | { type: "started"; provider: string; model: string }
   | { type: "delta"; content: string }
+  /** Raw, unvalidated fragment of a call being assembled. For display only; never a proposal. */
+  | {
+      type: "tool_call_delta";
+      index: number;
+      id: string | null;
+      name: string | null;
+      arguments_fragment: string | null;
+    }
+  /** A fully assembled, validated proposal, emitted just before `completed`. */
+  | { type: "tool_call_completed"; call: ToolCall }
   | ({ type: "completed" } & ChatStreamSummary);
 
 export interface GenerationModelInfo {
@@ -292,6 +331,10 @@ export interface GenerativeMLOptions {
     seed?: boolean;
     jsonObject?: boolean;
     jsonSchema?: boolean;
+    /** Tool definitions, assistant tool calls, and tool messages. Must be declared. */
+    tools?: boolean;
+    /** The `tool_choice` control. Must be declared. */
+    toolChoice?: boolean;
   };
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
@@ -299,7 +342,7 @@ export interface GenerativeMLOptions {
 }
 
 export type GenerationErrorCode =
-  | "invalid_request" | "model_not_found" | "provider_unavailable" | "capability_mismatch"
+  | "invalid_request" | "invalid_output" | "model_not_found" | "provider_unavailable" | "capability_mismatch"
   | "resource_limit" | "timeout" | "cancelled" | "transport" | "protocol" | "execution"
   | "native" | string;
 

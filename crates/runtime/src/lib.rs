@@ -68,7 +68,8 @@ pub use ml_runtime_provider;
 pub use ml_runtime_provider::{
     ChatMessage, ChatMetadata, ChatRequest, ChatResponse, ChatRole, ChatStreamEvent,
     ChatStreamSummary, ExecutionLocation, FinishReason, GenerationCapabilities,
-    GenerationModelInfo, GenerationOptions, ResponseFormat, StructuredOutput, Usage,
+    GenerationModelInfo, GenerationOptions, ResponseFormat, StructuredOutput, ToolCall, ToolChoice,
+    ToolDefinition, Usage,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

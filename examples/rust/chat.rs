@@ -21,7 +21,8 @@ async fn main() -> ml_runtime::RuntimeResult<()> {
             ChatStreamEvent::Completed(summary) => {
                 println!("\n{:?} {:?}", summary.finish_reason, summary.metadata.execution);
             }
-            ChatStreamEvent::Started { .. } => {}
+            // Started and (for tool calling) ToolCall* events carry no text.
+            _ => {}
         }
     }
     Ok(())

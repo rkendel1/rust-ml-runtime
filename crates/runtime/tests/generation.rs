@@ -372,6 +372,8 @@ impl GenerationProvider for SilentProvider {
             seed: true,
             json_object: true,
             json_schema: true,
+            tools: true,
+            tool_choice: true,
         }
     }
     async fn list_models(
