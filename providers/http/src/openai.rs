@@ -8,10 +8,11 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use ml_runtime_common::{BoxStream, CancellationToken, RuntimeError, RuntimeResult};
+use ml_runtime_provider::is_valid_tool_name;
 use ml_runtime_provider::{
-    ChatMessage, ChatMetadata, ChatRequest, ChatResponse, ChatRole, ChatStreamEvent,
-    ChatStreamSummary, ExecutionLocation, FinishReason, GenerationCapabilities,
-    GenerationModelInfo, GenerationProvider, ProviderCapabilities, ResponseFormat, Usage,
+    ChatMessage, ChatMetadata, ChatRequest, ChatResponse, ChatStreamEvent, ChatStreamSummary,
+    ExecutionLocation, FinishReason, GenerationCapabilities, GenerationModelInfo,
+    GenerationProvider, ProviderCapabilities, ResponseFormat, ToolCall, ToolChoice, Usage,
     DEFAULT_MAX_OUTPUT_BYTES,
 };
 use reqwest::{Response, StatusCode, Url};
@@ -72,6 +73,8 @@ pub struct OpenAiCompatibleConfig {
     pub max_output_bytes: usize,
     pub max_response_bytes: usize,
     pub max_event_bytes: usize,
+    /// Maximum tool calls accepted in one response.
+    pub max_tool_calls: usize,
     /// Bounded channel depth between the network task and the consumer.
     pub stream_buffer: usize,
 }
@@ -90,6 +93,9 @@ impl OpenAiCompatibleConfig {
                 // discovered; it must be declared.
                 json_object: false,
                 json_schema: false,
+                // Tool support is likewise per-server and must be declared.
+                tools: false,
+                tool_choice: false,
             },
             stream_usage: true,
             connect_timeout: Duration::from_secs(10),
@@ -98,6 +104,7 @@ impl OpenAiCompatibleConfig {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_response_bytes: 16 * 1024 * 1024,
             max_event_bytes: 1024 * 1024,
+            max_tool_calls: 32,
             stream_buffer: 32,
         }
     }
@@ -174,6 +181,7 @@ impl OpenAiCompatibleProvider {
             ("max_output_bytes", config.max_output_bytes),
             ("max_response_bytes", config.max_response_bytes),
             ("max_event_bytes", config.max_event_bytes),
+            ("max_tool_calls", config.max_tool_calls),
             ("stream_buffer", config.stream_buffer),
         ] {
             if value == 0 {
@@ -253,7 +261,22 @@ impl OpenAiCompatibleProvider {
                 .iter()
                 .map(|m| WireMessage {
                     role: m.role.as_str(),
-                    content: &m.content,
+                    content: (m.tool_calls.is_empty() || !m.content.is_empty())
+                        .then_some(m.content.as_str()),
+                    tool_calls: (!m.tool_calls.is_empty()).then(|| {
+                        m.tool_calls
+                            .iter()
+                            .map(|c| WireToolCallIn {
+                                id: &c.id,
+                                r#type: "function",
+                                function: WireFunctionIn {
+                                    name: &c.name,
+                                    arguments: c.arguments.to_string(),
+                                },
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: m.tool_call_id.as_deref(),
                 })
                 .collect(),
             stream,
@@ -280,6 +303,27 @@ impl OpenAiCompatibleProvider {
                     },
                 }),
             },
+            tools: (!o.tools.is_empty()).then(|| {
+                o.tools
+                    .iter()
+                    .map(|t| WireTool {
+                        r#type: "function",
+                        function: WireToolFunction {
+                            name: &t.name,
+                            description: t.description.as_deref(),
+                            parameters: &t.input_schema,
+                        },
+                    })
+                    .collect()
+            }),
+            tool_choice: o.tool_choice.as_ref().map(|choice| match choice {
+                ToolChoice::Auto => WireToolChoice::Mode("auto"),
+                ToolChoice::None => WireToolChoice::Mode("none"),
+                ToolChoice::Tool { name } => WireToolChoice::Named {
+                    r#type: "function",
+                    function: WireFunctionName { name },
+                },
+            }),
         }
     }
 
@@ -297,7 +341,55 @@ impl OpenAiCompatibleProvider {
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    /// `null` for an assistant turn that only proposed tool calls.
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<WireToolCallIn<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct WireToolCallIn<'a> {
+    id: &'a str,
+    r#type: &'static str,
+    function: WireFunctionIn<'a>,
+}
+
+#[derive(Serialize)]
+struct WireFunctionIn<'a> {
+    name: &'a str,
+    /// The wire carries arguments as a JSON-encoded string.
+    arguments: String,
+}
+
+#[derive(Serialize)]
+struct WireTool<'a> {
+    r#type: &'static str,
+    function: WireToolFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct WireToolFunction<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    parameters: &'a Value,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireToolChoice<'a> {
+    Mode(&'static str),
+    Named {
+        r#type: &'static str,
+        function: WireFunctionName<'a>,
+    },
+}
+
+#[derive(Serialize)]
+struct WireFunctionName<'a> {
+    name: &'a str,
 }
 
 #[derive(Serialize)]
@@ -338,6 +430,10 @@ struct WireRequest<'a> {
     seed: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<WireResponseFormat<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<WireTool<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<WireToolChoice<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -377,6 +473,20 @@ struct WireChoice {
 struct WireResponseMessage {
     role: Option<String>,
     content: Option<String>,
+    tool_calls: Option<Vec<WireToolCallOut>>,
+}
+
+#[derive(Deserialize)]
+struct WireToolCallOut {
+    index: Option<u32>,
+    id: Option<String>,
+    function: Option<WireFunctionOut>,
+}
+
+#[derive(Deserialize)]
+struct WireFunctionOut {
+    name: Option<String>,
+    arguments: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -395,6 +505,7 @@ fn finish_reason(raw: String) -> FinishReason {
         "stop" => FinishReason::Stop,
         "length" => FinishReason::Length,
         "content_filter" => FinishReason::ContentFilter,
+        "tool_calls" => FinishReason::ToolCalls,
         _ => FinishReason::Other(raw),
     }
 }
@@ -403,6 +514,148 @@ fn protocol(operation: &str, reason: impl Into<String>) -> RuntimeError {
     RuntimeError::Protocol {
         operation: operation.to_owned(),
         reason: reason.into(),
+    }
+}
+
+// ---- tool-call assembly ----------------------------------------------------------
+
+struct PendingCall {
+    index: u32,
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Raw fragment, reported to the consumer for display only.
+struct CallFragment {
+    index: u32,
+    id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+/// Accumulates tool-call fragments (streamed or whole) and turns them into
+/// validated proposals only in [`ToolAssembler::finish`]. Nothing is invented:
+/// a call without an id or name, with non-JSON or non-object arguments, or a
+/// duplicate id fails the whole response.
+struct ToolAssembler {
+    calls: Vec<PendingCall>,
+    max_calls: usize,
+    bytes: usize,
+}
+
+impl ToolAssembler {
+    fn new(max_calls: usize) -> Self {
+        Self {
+            calls: Vec::new(),
+            max_calls,
+            bytes: 0,
+        }
+    }
+
+    fn feed(
+        &mut self,
+        wire: Vec<WireToolCallOut>,
+        operation: &str,
+    ) -> RuntimeResult<Vec<CallFragment>> {
+        let mut fragments = Vec::new();
+        for call in wire {
+            let function = call.function;
+            let name = function.as_ref().and_then(|f| f.name.clone());
+            let arguments = match function.and_then(|f| f.arguments) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(text)) => Some(text),
+                Some(_) => {
+                    return Err(protocol(
+                        operation,
+                        "tool call arguments must be a JSON-encoded string",
+                    ))
+                }
+            };
+            let slot = match (
+                call.index,
+                self.calls.iter().position(|c| Some(c.index) == call.index),
+            ) {
+                (_, Some(slot)) => slot,
+                // Servers that omit `index`: an id starts a new call, anything
+                // else continues the latest one.
+                (None, None) if call.id.is_none() && !self.calls.is_empty() => self.calls.len() - 1,
+                (index, None) => {
+                    if self.calls.len() >= self.max_calls {
+                        return Err(RuntimeError::ResourceLimit {
+                            reason: format!(
+                                "response proposes more than {} tool calls",
+                                self.max_calls
+                            ),
+                        });
+                    }
+                    let index = index.unwrap_or(self.calls.len() as u32);
+                    self.calls.push(PendingCall {
+                        index,
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
+                    self.calls.len() - 1
+                }
+            };
+            let pending = &mut self.calls[slot];
+            // Fragments are concatenated as the wire specifies. A server that
+            // repeats a whole name/id per chunk corrupts the value, which is
+            // then rejected (unknown tool / failed correlation), not guessed.
+            let id = call.id.filter(|f| !f.is_empty());
+            let name = name.filter(|f| !f.is_empty());
+            let arguments = arguments.filter(|f| !f.is_empty());
+            self.bytes += id.as_deref().map_or(0, str::len)
+                + name.as_deref().map_or(0, str::len)
+                + arguments.as_deref().map_or(0, str::len);
+            if let Some(id) = &id {
+                pending.id.push_str(id);
+            }
+            if let Some(name) = &name {
+                pending.name.push_str(name);
+            }
+            if let Some(arguments) = &arguments {
+                pending.arguments.push_str(arguments);
+            }
+            if id.is_some() || name.is_some() || arguments.is_some() {
+                fragments.push(CallFragment {
+                    index: pending.index,
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+        }
+        Ok(fragments)
+    }
+
+    fn finish(self, operation: &str) -> RuntimeResult<Vec<ToolCall>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(self.calls.len());
+        for call in self.calls {
+            if call.id.is_empty() || call.name.is_empty() {
+                return Err(protocol(operation, "tool call is missing its id or name"));
+            }
+            if !seen.insert(call.id.clone()) {
+                return Err(protocol(operation, "duplicate tool call id"));
+            }
+            if !is_valid_tool_name(&call.name) {
+                return Err(RuntimeError::InvalidOutput {
+                    reason: "model proposed a tool call with a malformed tool name".to_owned(),
+                });
+            }
+            let invalid = |why: &str| RuntimeError::InvalidOutput {
+                reason: format!("arguments for tool call to {:?} {why}", call.name),
+            };
+            let arguments: Value = serde_json::from_str(&call.arguments)
+                .map_err(|_| invalid("are not complete, valid JSON"))?;
+            if !arguments.is_object() {
+                return Err(invalid("are not a JSON object"));
+            }
+            out.push(ToolCall::new(call.id, call.name, arguments));
+        }
+        Ok(out)
     }
 }
 
@@ -663,7 +916,9 @@ impl GenerationProvider for OpenAiCompatibleProvider {
             ));
         }
         let content = message.content.unwrap_or_default();
-        if content.len() > self.config.max_output_bytes {
+        let mut assembler = ToolAssembler::new(self.config.max_tool_calls);
+        assembler.feed(message.tool_calls.unwrap_or_default(), operation)?;
+        if content.len() + assembler.bytes > self.config.max_output_bytes {
             return Err(RuntimeError::ResourceLimit {
                 reason: format!(
                     "generated output exceeds {} bytes",
@@ -671,8 +926,9 @@ impl GenerationProvider for OpenAiCompatibleProvider {
                 ),
             });
         }
+        let tool_calls = assembler.finish(operation)?;
         Ok(ChatResponse {
-            message: ChatMessage::new(ChatRole::Assistant, content),
+            message: ChatMessage::assistant_with_tool_calls(content, tool_calls),
             finish_reason: choice.finish_reason.map(finish_reason),
             usage: completion.usage.map(Usage::from),
             metadata: self.metadata(&request.model, &tracker, false),
@@ -796,6 +1052,7 @@ impl OpenAiCompatibleProvider {
         let mut usage = None;
         let mut output_bytes = 0usize;
         let mut done = false;
+        let mut assembler = ToolAssembler::new(self.config.max_tool_calls);
 
         'read: loop {
             let chunk = tokio::select! {
@@ -840,10 +1097,35 @@ impl OpenAiCompatibleProvider {
                     if let Some(reason) = choice.finish_reason {
                         finish = Some(finish_reason(reason));
                     }
-                    if let Some(content) = choice.delta.and_then(|d| d.content) {
+                    let mut delta = choice.delta;
+                    if let Some(wire) = delta.as_mut().and_then(|d| d.tool_calls.take()) {
+                        let fragments = assembler.feed(wire, operation)?;
+                        if output_bytes + assembler.bytes > self.config.max_output_bytes {
+                            return Err(RuntimeError::ResourceLimit {
+                                reason: format!(
+                                    "generated output exceeds {} bytes",
+                                    self.config.max_output_bytes
+                                ),
+                            });
+                        }
+                        for fragment in fragments {
+                            Self::emit(
+                                sender,
+                                cancellation,
+                                ChatStreamEvent::ToolCallDelta {
+                                    index: fragment.index,
+                                    id: fragment.id,
+                                    name: fragment.name,
+                                    arguments_fragment: fragment.arguments,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                    if let Some(content) = delta.and_then(|d| d.content) {
                         if !content.is_empty() {
                             output_bytes += content.len();
-                            if output_bytes > self.config.max_output_bytes {
+                            if output_bytes + assembler.bytes > self.config.max_output_bytes {
                                 return Err(RuntimeError::ResourceLimit {
                                     reason: format!(
                                         "generated output exceeds {} bytes",
@@ -871,6 +1153,15 @@ impl OpenAiCompatibleProvider {
                 operation,
                 "stream ended before the provider signalled completion",
             ));
+        }
+        // Assemble and validate every call before any proposal is exposed.
+        for call in assembler.finish(operation)? {
+            Self::emit(
+                sender,
+                cancellation,
+                ChatStreamEvent::ToolCallCompleted { call },
+            )
+            .await?;
         }
         Self::emit(
             sender,

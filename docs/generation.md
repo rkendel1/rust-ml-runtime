@@ -77,13 +77,14 @@ Supports `GET {base}/models`, `POST {base}/chat/completions`, and SSE streaming.
 |---|---|---|
 | `api_key` | none | Bearer token. Debug-redacted, never serialized or returned. |
 | `location` | inferred | `Local` / `Remote` override. |
-| `capabilities` | streaming, stop, seed on; `json_object`, `json_schema` **off** | Optional features differ between servers and cannot be discovered; unsupported requests are rejected before any request is sent. |
+| `capabilities` | streaming, stop, seed on; `json_object`, `json_schema`, `tools`, `tool_choice` **off** | Optional features differ between servers and cannot be discovered; unsupported requests are rejected before any request is sent. |
 | `connect_timeout` | 10 s | |
 | `request_timeout` | 120 s | Whole operation for non-streaming calls and model listing; time to response headers for streams. |
 | `stream_idle_timeout` | 60 s | Maximum silence between stream chunks. |
 | `max_output_bytes` | 4 MiB | Bounds generated text. |
 | `max_response_bytes` | 16 MiB | Bounds a non-streaming body. |
 | `max_event_bytes` | 1 MiB | Bounds one SSE line/event. |
+| `max_tool_calls` | 32 | Maximum tool calls in one response. |
 | `stream_buffer` | 32 | Bounded channel: a slow consumer applies backpressure to the socket. |
 
 Safety properties:
@@ -107,7 +108,8 @@ Failures reuse `RuntimeError`; no variants were added.
 | HTTP 400/404/405/409/413/415/422 (provider rejected the request) | `InvalidRequest` (404 with a model message: `ModelNotFound`) |
 | HTTP 401/403, 429, 5xx, mid-stream `error` event | `ProviderUnavailable` |
 | Unparseable or structurally invalid payload | `Protocol` |
-| Option the provider is not declared to support | `CapabilityMismatch` |
+| Option the provider is not declared to support (including tools) | `CapabilityMismatch` |
+| Model produced an unusable tool proposal (bad/undefined tool, arguments not a JSON object or not matching the schema) | `InvalidOutput` |
 | Output or response over a configured bound | `ResourceLimit` |
 | Cancelled | `Cancelled` |
 
@@ -140,6 +142,106 @@ does not implement, which would present unvalidated output as verified. When
 streaming with a JSON format the runtime buffers the text for validation, bounded
 at 4 MiB.
 
+## Tool calling
+
+Tool calling is a **protocol capability**: the caller offers tool definitions,
+the model may answer with *proposals* to call them, and the caller sends back
+results in a later request. **rust-ml-runtime never executes a tool**, grants
+no authority, keeps no conversation state, and runs no loop. A proposal is not
+evidence that an operation ran, was authorized, or succeeded; the model's
+output is a proposal, not reality.
+
+```text
+caller ── tools + messages ──▶ runtime ──▶ provider ──▶ model
+caller ◀── assistant message with tool_calls (proposals) ──
+caller: validate → authorize → EXECUTE (application code, not the runtime)
+caller ── messages + assistant tool_calls + tool result ──▶ runtime ──▶ …
+caller ◀── final assistant answer ──
+```
+
+Working examples: `examples/rust/tool_calling.rs` and
+`examples/typescript/tool-calling.ts`. Each runs a deterministic mock tool in
+the application and marks authorization and execution as application-owned.
+
+### Contract
+
+- `GenerationOptions.tools: Vec<ToolDefinition>` — `name` (`[A-Za-z0-9_-]{1,64}`,
+  unique), optional `description`, and `input_schema` (a JSON Schema object).
+  The schema constrains proposed arguments; it is not authorization.
+- `GenerationOptions.tool_choice: Option<ToolChoice>` — `Auto`, `None`, or
+  `Tool { name }` (must name an offered tool). Absent means the provider default.
+- `ChatMessage.tool_calls: Vec<ToolCall>` on assistant messages: `id`, `name`,
+  and `arguments` (a parsed JSON object). A message may carry text, calls, or
+  both. `ChatResponse.message` is where proposals arrive, with
+  `FinishReason::ToolCalls` when the provider says so. Some servers report
+  `stop` even when proposing calls; finish reasons are passed through, so check
+  `tool_calls`, not the finish reason.
+- `ChatRole::Tool` messages carry the caller-supplied result in `content`
+  (serialize JSON yourself) and `tool_call_id`. Each must answer an earlier,
+  still-unanswered assistant call; otherwise the request is an `InvalidRequest`
+  before anything is sent. Replay the assistant turn unchanged.
+- No hidden state: every request carries the full tool list and history.
+
+### Validation and errors
+
+Before sending, the runtime checks names, schemas (compiled with `jsonschema`),
+the choice, and call/result correlation. After a response, a proposal is exposed
+only if it is complete: it has an id and a valid tool name, its arguments are
+complete JSON that is an object, the tool was actually offered, it satisfies
+`tool_choice`, and it satisfies the tool's schema. Otherwise the whole response
+is an error and nothing is returned as a proposal: `Protocol` for a malformed
+wire payload (missing id/name, duplicate ids, non-string arguments),
+`InvalidOutput` for a model-produced problem (undefined tool, malformed or
+non-object arguments, schema violation, `tool_choice` violated),
+`ResourceLimit` beyond `max_tool_calls`/`max_output_bytes`, and
+`CapabilityMismatch` when the provider is not declared to support `tools` (or
+`tool_choice`). Support cannot be discovered, so it is never assumed. Error
+messages name locations in the arguments, never their values. `Debug` output of
+`ToolCall` and messages omits arguments and content.
+
+### Streaming
+
+`chat_stream` adds two events to `Started` / `Delta` / `Completed`:
+
+- `ToolCallDelta { index, id, name, arguments_fragment }` — a raw fragment while
+  a call is being assembled, for display only. It is unvalidated and is never a
+  proposal.
+- `ToolCallCompleted { call }` — a fully assembled, validated proposal. These
+  are released only after the whole response arrived and **every** call
+  validated, in call order, immediately before `Completed`. If any call is bad,
+  none is released and the stream ends with an error.
+
+Id, name, and argument fragments are concatenated per `index` (calls may
+interleave). A stream that ends before `[DONE]` or a finish reason, or whose
+arguments are incomplete (including a `length` truncation), is an error.
+Buffering, backpressure, idle timeouts, cancellation, and connection release are
+unchanged; tool fragments count toward `max_output_bytes`.
+
+### Provider limitations
+
+- Support for `tools` and `tool_choice` must be declared (`--capability tools`,
+  `--capability tool-choice`; `capabilities: { tools, toolChoice }` in Node).
+  Servers differ: some ignore `tool_choice`, some stream a whole call in one
+  chunk, and some report `stop` instead of `tool_calls`.
+- Only function tools are supported. Arguments must arrive as a JSON-encoded
+  string (as the OpenAI wire specifies); an empty string is treated as
+  incomplete, not as `{}`.
+- A server that repeats the whole id or name in every streamed chunk (instead of
+  fragmenting it) yields a corrupted name/id, which is rejected as an undefined
+  tool or failed correlation rather than guessed.
+- Models can propose calls the application must refuse. Authorization, identity,
+  rate limits, and execution policy remain the application's responsibility.
+
+### Compatibility
+
+The wire JSON is additive: text-only requests serialize exactly as before and
+old JSON still deserializes. Rust source impacts (pre-1.0): `ChatRole`,
+`FinishReason`, and `ChatStreamEvent` gained variants (exhaustive `match`es need
+an arm); `ChatMessage`, `GenerationOptions`, and `GenerationCapabilities` gained
+fields (use the constructors and `..Default::default()` instead of exhaustive
+literals); `finish_reason: "tool_calls"` now maps to `FinishReason::ToolCalls`
+instead of `Other("tool_calls")`.
+
 ## CLI
 
 ```text
@@ -156,6 +258,12 @@ fallback. Other flags: `--messages-json FILE|-` (full conversation),
 Structured output: `--json-schema FILE [--schema-name N] [--strict]` or
 `--json-object`, plus `--capability json-schema` / `json-object` to declare that
 the endpoint supports it (also `no-streaming`, `no-stop`, `no-seed`).
+
+Tool proposals can be requested with `--tool-file FILE` (a JSON array of
+`{name, description?, input_schema}`), `--tool-choice auto|none|NAME`, and
+`--capability tools` / `tool-choice`. The CLI prints each proposal to stderr as
+`PROPOSED tool call (not executed, not authorized)`, never runs it, and does not
+follow up; use `--messages-json` to submit a conversation containing tool results.
 
 Credentials: set `ML_RUNTIME_API_KEY`, or name another variable with
 `--api-key-env NAME`. There is deliberately no `--api-key` flag, so keys do not
@@ -199,6 +307,7 @@ packaging is unchanged.
 
 ## Scope
 
-Not included: automatic provider routing, an interactive chat UI, tool/function
-calling, multiple choices (`n > 1`), embeddings, and any agent loop.
+Not included: automatic provider routing, an interactive chat UI, tool
+*execution* (see above), multiple choices (`n > 1`), embeddings, and any agent
+loop.
 Authorization and application policy remain the application's responsibility.

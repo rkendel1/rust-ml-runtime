@@ -7,7 +7,8 @@ use futures_util::StreamExt;
 use ml_runtime::{
     ApiKey, ChatMessage, ChatMetadata, ChatRequest, ChatStreamEvent, ExecutionLocation,
     FinishReason, GenerationOptions, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    ResponseFormat, Runtime, RuntimeError, StructuredOutput, Usage,
+    ResponseFormat, Runtime, RuntimeError, StructuredOutput, ToolCall, ToolChoice, ToolDefinition,
+    Usage,
 };
 use std::{io::Write, path::PathBuf, time::Duration};
 
@@ -62,6 +63,14 @@ pub struct ChatArgs {
     /// Request any valid JSON object
     #[arg(long)]
     json_object: bool,
+    /// JSON file with tool definitions the model may *propose* to call:
+    /// [{"name": "...", "description": "...", "input_schema": {...}}].
+    /// The CLI never executes tools; proposals are printed, not run.
+    #[arg(long)]
+    tool_file: Option<PathBuf>,
+    /// auto, none, or the name of a tool the model must call
+    #[arg(long, requires = "tool_file")]
+    tool_choice: Option<String>,
     /// Environment variable holding the bearer token (default: ML_RUNTIME_API_KEY, if set)
     #[arg(long)]
     api_key_env: Option<String>,
@@ -69,7 +78,7 @@ pub struct ChatArgs {
     #[arg(long, value_parser = ["local", "remote"])]
     location: Option<String>,
     /// Declare an endpoint capability (they cannot be discovered)
-    #[arg(long = "capability", value_parser = ["json-object", "json-schema", "no-streaming", "no-stop", "no-seed"])]
+    #[arg(long = "capability", value_parser = ["json-object", "json-schema", "tools", "tool-choice", "no-streaming", "no-stop", "no-seed"])]
     capabilities: Vec<String>,
     #[arg(long, default_value_t = 10)]
     connect_timeout_secs: u64,
@@ -134,8 +143,26 @@ impl ChatArgs {
             (None, true) => ResponseFormat::JsonObject,
             (None, false) => ResponseFormat::Text,
         };
+        let tools: Vec<ToolDefinition> = match &self.tool_file {
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| invalid(format!("reading {}: {e}", path.display())))?;
+                serde_json::from_str(&text)
+                    .map_err(|e| invalid(format!("invalid tool definitions: {e}")))?
+            }
+            None => Vec::new(),
+        };
+        let tool_choice = self.tool_choice.as_deref().map(|choice| match choice {
+            "auto" => ToolChoice::Auto,
+            "none" => ToolChoice::None,
+            name => ToolChoice::Tool {
+                name: name.to_owned(),
+            },
+        });
         Ok(
             ChatRequest::new(model, messages).with_options(GenerationOptions {
+                tools,
+                tool_choice,
                 temperature: self.temperature,
                 top_p: self.top_p,
                 max_tokens: self.max_tokens,
@@ -152,6 +179,8 @@ impl ChatArgs {
             match capability.as_str() {
                 "json-object" => config.capabilities.json_object = true,
                 "json-schema" => config.capabilities.json_schema = true,
+                "tools" => config.capabilities.tools = true,
+                "tool-choice" => config.capabilities.tool_choice = true,
                 "no-streaming" => config.capabilities.streaming = false,
                 "no-stop" => config.capabilities.stop_sequences = false,
                 "no-seed" => config.capabilities.seed = false,
@@ -251,6 +280,15 @@ fn diagnostics(
     }
 }
 
+/// Proposals are information for the operator, never actions: this command
+/// does not execute tools and says so.
+fn print_proposal(call: &ToolCall) {
+    eprintln!(
+        "PROPOSED tool call (not executed, not authorized): id={} name={} arguments={}",
+        call.id, call.name, call.arguments
+    );
+}
+
 fn structured_exit(structured: &Option<StructuredOutput>) -> i32 {
     match structured {
         Some(s) if !s.is_validated() => EXIT_STRUCTURED_INVALID,
@@ -329,6 +367,7 @@ async fn execute(args: &ChatArgs) -> Result<i32, Failure> {
         } else {
             println!("{}", response.message.content);
         }
+        response.message.tool_calls.iter().for_each(print_proposal);
         diagnostics(
             &response.metadata,
             &response.finish_reason,
@@ -353,6 +392,8 @@ async fn stream(runtime: &Runtime, args: &ChatArgs, request: ChatRequest) -> Res
             );
         } else if let ChatStreamEvent::Delta { content } = &event {
             let _ = write!(stdout, "{content}");
+        } else if let ChatStreamEvent::ToolCallCompleted { call } = &event {
+            print_proposal(call);
         }
         let _ = stdout.flush();
         if let ChatStreamEvent::Completed(summary) = event {

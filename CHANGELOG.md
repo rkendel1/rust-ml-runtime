@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added provider-mediated tool calling to generative inference: tool
+  definitions, `ToolChoice`, tool-call proposals on assistant messages, and
+  tool-result messages, over the OpenAI-compatible adapter, including streaming
+  assembly (`ToolCallDelta`, `ToolCallCompleted`). Proposals are validated but
+  never executed; execution and authorization stay with the application.
+  Rust source impacts: new variants on `ChatRole`, `FinishReason`, and
+  `ChatStreamEvent`, and new fields on `ChatMessage`, `GenerationOptions`, and
+  `GenerationCapabilities` (wire JSON is backward compatible).
 - Added a generative inference contract (`ChatRequest`, `ChatResponse`,
   `ChatStreamEvent`, `GenerationProvider`) alongside, and independent of, typed
   inference, with `Runtime::chat` and `Runtime::chat_stream`.

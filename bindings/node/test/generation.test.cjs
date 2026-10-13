@@ -83,3 +83,19 @@ test('instances never expose their configuration', () => {
   assert.ok(!JSON.stringify(ml).includes('sk-secret-xyz'));
   assert.ok(!require('node:util').inspect(ml, { showHidden: true, depth: 6 }).includes('sk-secret-xyz'));
 });
+
+test('tool definitions and tool messages reach native code untouched', async () => {
+  const ml = new GenerativeML({ endpoint: 'http://127.0.0.1:1/v1', capabilities: { tools: true, toolChoice: true } });
+  const sent = {
+    model: 'm',
+    messages: [
+      { role: 'user', content: 'x' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 't', arguments: { a: 1 } }] },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+    ],
+    options: { tools: [{ name: 't', input_schema: { type: 'object' } }], tool_choice: { type: 'tool', name: 't' } },
+  };
+  await ml.chat(sent);
+  assert.deepEqual(JSON.parse(log.requests.at(-1)), sent);
+  assert.ok(JSON.parse(log.configs.at(-1)).capabilities.toolChoice);
+});

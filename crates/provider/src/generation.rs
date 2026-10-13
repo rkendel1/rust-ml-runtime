@@ -25,6 +25,8 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    /// A caller-supplied result for an earlier [`ToolCall`] proposal.
+    Tool,
 }
 
 impl ChatRole {
@@ -33,7 +35,92 @@ impl ChatRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::Tool => "tool",
         }
+    }
+}
+
+/// Longest tool name accepted (matches common provider limits).
+pub const MAX_TOOL_NAME_BYTES: usize = 64;
+const MAX_TOOLS: usize = 128;
+
+/// Tool names are restricted to `[A-Za-z0-9_-]{1,64}` so they are safe on every
+/// provider wire and in logs.
+pub fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_TOOL_NAME_BYTES
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// A tool the model may *propose* to call. The runtime never executes it: the
+/// schema constrains the proposed arguments and grants no authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSON Schema (an object) for the tool's arguments.
+    pub input_schema: Value,
+}
+
+impl ToolDefinition {
+    pub fn new(name: impl Into<String>, input_schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            input_schema,
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// Provider-neutral tool selection policy. Absent means the provider default.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides whether to propose tool calls.
+    Auto,
+    /// The model must not propose tool calls.
+    None,
+    /// The model must propose a call to this named tool.
+    Tool { name: String },
+}
+
+/// A tool-call **proposal** produced by a model. It is not evidence that the
+/// operation ran, was authorized, or would succeed; the calling application
+/// decides whether and how to execute it.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCall {
+    /// Provider call ID; a [`ChatRole::Tool`] message echoes it in `tool_call_id`.
+    pub id: String,
+    pub name: String,
+    /// Parsed arguments (always a JSON object when produced by a provider).
+    pub arguments: Value,
+}
+
+impl ToolCall {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
+/// Arguments may contain sensitive data, so `Debug` omits them.
+impl fmt::Debug for ToolCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolCall")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -41,6 +128,13 @@ impl ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Tool-call proposals; only on `Assistant` messages. Text and calls may
+    /// both be present where the provider produced both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Only on `Tool` messages: the [`ToolCall::id`] this content answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
@@ -48,6 +142,8 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
     pub fn system(content: impl Into<String>) -> Self {
@@ -59,6 +155,20 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(ChatRole::Assistant, content)
     }
+    /// An assistant turn that proposed tool calls (replayed in the next request).
+    pub fn assistant_with_tool_calls(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        Self {
+            tool_calls: calls,
+            ..Self::new(ChatRole::Assistant, content)
+        }
+    }
+    /// The caller-supplied result for the call with `call_id`.
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: Some(call_id.into()),
+            ..Self::new(ChatRole::Tool, content)
+        }
+    }
 }
 
 /// Message content may be sensitive, so `Debug` reports only its length.
@@ -67,6 +177,8 @@ impl fmt::Debug for ChatMessage {
         f.debug_struct("ChatMessage")
             .field("role", &self.role)
             .field("content_bytes", &self.content.len())
+            .field("tool_calls", &self.tool_calls.len())
+            .field("tool_call_id", &self.tool_call_id)
             .finish()
     }
 }
@@ -97,6 +209,11 @@ pub struct GenerationOptions {
     pub seed: Option<i64>,
     #[serde(default)]
     pub response_format: ResponseFormat,
+    /// Tools the model may propose to call. Empty means none are offered.
+    #[serde(default)]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(default)]
+    pub tool_choice: Option<ToolChoice>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -162,6 +279,100 @@ impl ChatRequest {
                 return invalid("json schema name must be non-empty [A-Za-z0-9_-]");
             }
         }
+        self.validate_tools()?;
+        self.validate_messages()
+    }
+
+    fn validate_tools(&self) -> RuntimeResult<()> {
+        use ml_runtime_common::RuntimeError::InvalidRequest;
+        let invalid = |reason: String| Err(InvalidRequest { reason });
+        let o = &self.options;
+        if o.tools.len() > MAX_TOOLS {
+            return invalid(format!("at most {MAX_TOOLS} tools may be offered"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for tool in &o.tools {
+            if !is_valid_tool_name(&tool.name) {
+                return invalid(format!(
+                    "tool name must match [A-Za-z0-9_-]{{1,{MAX_TOOL_NAME_BYTES}}}"
+                ));
+            }
+            if !seen.insert(tool.name.as_str()) {
+                return invalid(format!("duplicate tool name {:?}", tool.name));
+            }
+            if !tool.input_schema.is_object() {
+                return invalid(format!(
+                    "input schema of tool {:?} must be a JSON object",
+                    tool.name
+                ));
+            }
+        }
+        match &o.tool_choice {
+            None => {}
+            Some(_) if o.tools.is_empty() => {
+                return invalid("tool_choice requires at least one tool".to_owned())
+            }
+            Some(ToolChoice::Tool { name }) if !seen.contains(name.as_str()) => {
+                return invalid(format!("tool_choice names undefined tool {name:?}"))
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Checks message shape and that every tool result answers an earlier
+    /// proposal exactly once. Nothing here implies a tool ever ran.
+    fn validate_messages(&self) -> RuntimeResult<()> {
+        use ml_runtime_common::RuntimeError::InvalidRequest;
+        let invalid = |reason: &str| {
+            Err(InvalidRequest {
+                reason: reason.to_owned(),
+            })
+        };
+        let mut open: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut proposed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for message in &self.messages {
+            match message.role {
+                ChatRole::Assistant => {
+                    if message.tool_call_id.is_some() {
+                        return invalid("only tool messages may carry tool_call_id");
+                    }
+                    for call in &message.tool_calls {
+                        if call.id.is_empty() || !is_valid_tool_name(&call.name) {
+                            return invalid(
+                                "tool call requires a non-empty id and a valid tool name",
+                            );
+                        }
+                        if !call.arguments.is_object() {
+                            return invalid("tool call arguments must be a JSON object");
+                        }
+                        if !proposed.insert(call.id.as_str()) {
+                            return invalid("duplicate tool call id");
+                        }
+                        open.insert(call.id.as_str());
+                    }
+                }
+                ChatRole::Tool => {
+                    if !message.tool_calls.is_empty() {
+                        return invalid("tool messages cannot propose tool calls");
+                    }
+                    let Some(id) = message.tool_call_id.as_deref().filter(|id| !id.is_empty())
+                    else {
+                        return invalid("tool message requires tool_call_id");
+                    };
+                    if !open.remove(id) {
+                        return invalid(
+                            "tool message does not answer an earlier unanswered tool call",
+                        );
+                    }
+                }
+                ChatRole::System | ChatRole::User => {
+                    if !message.tool_calls.is_empty() || message.tool_call_id.is_some() {
+                        return invalid("only assistant and tool messages carry tool fields");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -174,6 +385,8 @@ pub enum FinishReason {
     Stop,
     Length,
     ContentFilter,
+    /// The model stopped to propose tool calls. Proposals only: nothing ran.
+    ToolCalls,
     Other(String),
 }
 
@@ -264,6 +477,17 @@ pub enum ChatStreamEvent {
     Started { provider: String, model: String },
     /// Zero or more incremental content fragments, in order.
     Delta { content: String },
+    /// Raw, unvalidated fragment of a tool call being assembled. For display
+    /// only: it is never a usable or authorized proposal.
+    ToolCallDelta {
+        index: u32,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_fragment: Option<String>,
+    },
+    /// A fully assembled and validated proposal. Emitted only after the whole
+    /// response was received, immediately before `Completed`, in call order.
+    ToolCallCompleted { call: ToolCall },
     /// Exactly once on success. Never emitted after an error or cancellation.
     Completed(Box<ChatStreamSummary>),
 }
@@ -277,6 +501,10 @@ pub struct GenerationCapabilities {
     pub seed: bool,
     pub json_object: bool,
     pub json_schema: bool,
+    /// Tool definitions, assistant tool calls, and tool-result messages.
+    pub tools: bool,
+    /// The `tool_choice` control (`auto` / `none` / named tool).
+    pub tool_choice: bool,
 }
 
 impl GenerationCapabilities {
@@ -297,6 +525,18 @@ impl GenerationCapabilities {
         }
         if o.seed.is_some() && !self.seed {
             return unsupported("seed");
+        }
+        if (!o.tools.is_empty()
+            || request
+                .messages
+                .iter()
+                .any(|m| m.role == ChatRole::Tool || !m.tool_calls.is_empty()))
+            && !self.tools
+        {
+            return unsupported("tool calling");
+        }
+        if o.tool_choice.is_some() && !self.tool_choice {
+            return unsupported("tool_choice");
         }
         match o.response_format {
             ResponseFormat::JsonObject if !self.json_object => unsupported("JSON object output"),

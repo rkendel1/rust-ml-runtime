@@ -91,6 +91,7 @@ async fn chat_serializes_ordered_messages_and_options_and_reports_metadata() {
         stop: vec!["END".into()],
         seed: Some(7),
         response_format: ResponseFormat::Text,
+        ..Default::default()
     };
     let response = provider(&mock).chat(req, None).await.unwrap();
 
@@ -160,13 +161,13 @@ async fn absent_usage_and_finish_reason_are_not_fabricated() {
 
 #[tokio::test]
 async fn unknown_finish_reason_is_preserved() {
-    let body =
-        json!({"choices":[{"message":{"content":"x"},"finish_reason":"tool_calls"}]}).to_string();
+    let body = json!({"choices":[{"message":{"content":"x"},"finish_reason":"vendor_specific"}]})
+        .to_string();
     let mock = Mock::start(move |_| Reply::Json(200, body.clone())).await;
     let response = provider(&mock).chat(request(), None).await.unwrap();
     assert_eq!(
         response.finish_reason,
-        Some(FinishReason::Other("tool_calls".into()))
+        Some(FinishReason::Other("vendor_specific".into()))
     );
 }
 

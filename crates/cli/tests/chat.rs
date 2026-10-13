@@ -363,3 +363,89 @@ async fn list_models_and_remote_classification() {
         "{stderr}"
     );
 }
+
+#[tokio::test]
+async fn tool_proposals_are_printed_as_unexecuted_and_exit_zero() {
+    let dir = std::env::temp_dir().join(format!("ml-runtime-cli-tools-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tools = dir.join("tools.json");
+    std::fs::write(
+        &tools,
+        json!([{"name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]).to_string(),
+    )
+    .unwrap();
+    let tools = tools.to_str().unwrap();
+    let body = json!({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[
+        {"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
+        "finish_reason":"tool_calls"}]})
+    .to_string();
+    let mock = Mock::start(move |_| Reply::Json(200, body.clone())).await;
+    let args = [
+        "--model",
+        "m",
+        "--message",
+        "weather?",
+        "--tool-file",
+        tools,
+        "--tool-choice",
+        "get_weather",
+        "--capability",
+        "tools",
+        "--capability",
+        "tool-choice",
+    ];
+    let out = chat(&mock, &args, &[]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("PROPOSED tool call (not executed, not authorized)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("id=call_1") && stderr.contains("finish=tool_calls"),
+        "{stderr}"
+    );
+    let sent = mock.captured()[0].json();
+    assert_eq!(
+        sent["tool_choice"],
+        json!({"type":"function","function":{"name":"get_weather"}})
+    );
+    assert_eq!(
+        mock.captured().len(),
+        1,
+        "the CLI must not run the tool or follow up"
+    );
+
+    // JSON output carries the typed proposal.
+    let out = chat(&mock, &[&args[..], &["--json"]].concat(), &[]).await;
+    let value: serde_json::Value = serde_json::from_str(&text(&out.stdout)).unwrap();
+    assert_eq!(
+        value["message"]["tool_calls"][0]["arguments"],
+        json!({"city":"Paris"})
+    );
+
+    // Tools without the declared capability are refused before sending; a
+    // choice without tools is a usage error.
+    let before = mock.captured().len();
+    let out = chat(
+        &mock,
+        &["--model", "m", "--message", "x", "--tool-file", tools],
+        &[],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("tool calling"));
+    assert_eq!(
+        chat(
+            &mock,
+            &["--model", "m", "--message", "x", "--tool-choice", "auto"],
+            &[]
+        )
+        .await
+        .status
+        .code(),
+        Some(2)
+    );
+    assert_eq!(mock.captured().len(), before);
+    std::fs::remove_dir_all(dir).ok();
+}

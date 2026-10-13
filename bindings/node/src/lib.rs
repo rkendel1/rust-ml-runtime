@@ -340,6 +340,8 @@ fn provider_config(config_json: &str) -> Result<OpenAiCompatibleConfig> {
             ("seed", &mut out.capabilities.seed),
             ("jsonObject", &mut out.capabilities.json_object),
             ("jsonSchema", &mut out.capabilities.json_schema),
+            ("tools", &mut out.capabilities.tools),
+            ("toolChoice", &mut out.capabilities.tool_choice),
         ] {
             if let Some(value) = capabilities.get(key) {
                 *slot = value
