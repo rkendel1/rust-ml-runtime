@@ -305,6 +305,12 @@ Errors are `GenerationError` with `code` equal to the Rust variant category
 Types are in `index.d.ts`. No new npm package is introduced, and platform
 packaging is unchanged.
 
+## Local models
+
+A local model can be used today by pointing the provider at a local
+OpenAI-compatible server. In-process engines were audited; see
+[Local generation](local-generation.md).
+
 ## Scope
 
 Not included: automatic provider routing, an interactive chat UI, tool
