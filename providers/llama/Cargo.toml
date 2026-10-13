@@ -1,0 +1,31 @@
+[package]
+name = "ml-runtime-llama-provider"
+version = "0.2.3"
+edition = "2021"
+license = "MIT"
+description = "Embedded llama.cpp (GGUF) generation provider for rust-ml-runtime (spike)"
+repository = "https://github.com/rkendel1/rust-ml-runtime"
+# A spike: deliberately not published and not in the release tooling.
+publish = false
+
+# Standalone workspace: the repository's `cargo ... --workspace --all-features`
+# gates, the npm addon, and every published crate never build llama.cpp.
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+ml-runtime-common = { version = "0.2.3", path = "../../crates/common" }
+ml-runtime-provider = { version = "0.2.3", path = "../../crates/provider" }
+# `common` provides JSON-schema -> GBNF grammar conversion. `openmp` is left off
+# on purpose: it would add a runtime libgomp dependency to the native addon.
+llama-cpp-2 = { version = "=0.1.159", default-features = false, features = ["common"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+futures-util = "0.3"
+
+[dev-dependencies]
+rust-ml-runtime = { path = "../../crates/runtime" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde_json = "1"
