@@ -10,6 +10,10 @@ requests/results, execution policies, and structured errors re-exported at the
 crate root. The workspace is currently `0.2.x`; these APIs are supported but
 still pre-1.0 and follow Cargo semantic-versioning conventions.
 
+For conversation-style generation through OpenAI-compatible endpoints, see
+[Generative inference](generation.md). It is a separate contract; the typed
+API below is unchanged.
+
 ## Quickstart
 
 ```rust

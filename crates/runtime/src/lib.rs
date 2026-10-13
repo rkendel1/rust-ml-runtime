@@ -8,7 +8,7 @@ use ml_runtime_http_provider::HttpProvider;
 use ml_runtime_inference::InferenceChunk;
 use ml_runtime_model::{CatalogError, ModelCatalog, ModelHandle};
 use ml_runtime_onnx_backend::OnnxBackend;
-use ml_runtime_provider::{Provider, ProviderCapability};
+use ml_runtime_provider::{GenerationProvider, Provider, ProviderCapability};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -28,6 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 mod capability;
 mod decision;
+mod generation;
 
 pub use capability::{
     AvailabilityState, BuiltinCapabilityProvider, Capability, CapabilityAuthorizer,
@@ -43,6 +44,9 @@ pub use ml_runtime_backend;
 pub use ml_runtime_backend::{DecisionModel, DecisionModelProvider};
 pub use ml_runtime_common;
 pub use ml_runtime_common::{CancellationToken, RuntimeError, RuntimeResult};
+pub use ml_runtime_http_provider::openai::{
+    ApiKey, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+};
 pub use ml_runtime_inference;
 pub use ml_runtime_inference::{
     DecisionDependency, DecisionDependencyCondition, DecisionExecution,
@@ -61,6 +65,11 @@ pub use ml_runtime_model::{
     ModelLocation, ModelReference, ModelSpec, RegisteredModelInstaller,
 };
 pub use ml_runtime_provider;
+pub use ml_runtime_provider::{
+    ChatMessage, ChatMetadata, ChatRequest, ChatResponse, ChatRole, ChatStreamEvent,
+    ChatStreamSummary, ExecutionLocation, FinishReason, GenerationCapabilities,
+    GenerationModelInfo, GenerationOptions, ResponseFormat, StructuredOutput, Usage,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -545,6 +554,7 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    generation_providers: BTreeMap<String, Arc<dyn GenerationProvider>>,
     decision_providers: BTreeMap<String, Arc<dyn DecisionModelProvider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
     capability_registry: CapabilityRegistry,
@@ -557,6 +567,7 @@ impl Default for RuntimeBuilder {
             config: RuntimeConfig::default(),
             backends: BTreeMap::new(),
             providers: BTreeMap::new(),
+            generation_providers: BTreeMap::new(),
             decision_providers: BTreeMap::new(),
             catalog: None,
             capability_registry: CapabilityRegistry::with_builtins(),
@@ -689,6 +700,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a generative-inference provider by its declared name. The
+    /// caller selects it explicitly per request; it is never used as a
+    /// fallback for typed inference.
+    pub fn register_generation_provider<P>(mut self, provider: P) -> Self
+    where
+        P: GenerationProvider + 'static,
+    {
+        self.generation_providers
+            .insert(provider.name().to_owned(), Arc::new(provider));
+        self
+    }
+
     pub fn register_decision_provider<P>(mut self, provider: P) -> Self
     where
         P: DecisionModelProvider + 'static,
@@ -711,6 +734,7 @@ impl RuntimeBuilder {
             config: self.config.clone(),
             backends: self.backends,
             providers: self.providers,
+            generation_providers: self.generation_providers,
             decision_providers: self.decision_providers,
             catalog: self.catalog,
             capability_registry: self.capability_registry,
@@ -739,6 +763,7 @@ pub struct Runtime {
     config: RuntimeConfig,
     backends: BTreeMap<String, Arc<dyn Backend>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
+    generation_providers: BTreeMap<String, Arc<dyn GenerationProvider>>,
     decision_providers: BTreeMap<String, Arc<dyn DecisionModelProvider>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
     capability_registry: CapabilityRegistry,

@@ -58,6 +58,15 @@ that do not advertise batching continue to receive individual requests.
 `Runtime::status` and the `ml-runtime status` command expose generic resource
 state without exposing backend-private objects.
 
+## Generative inference
+
+Generative (chat) inference is a second public contract over the same
+architecture: `Runtime::chat` and `chat_stream` select a caller-named
+`GenerationProvider`, with the same concurrency admission, cancellation, and
+bounded streaming as typed inference. OpenAI-compatible wire types stay inside
+the provider adapter; there is no routing and no fallback to another provider,
+model, or execution mode. See [generation.md](generation.md).
+
 ## Streaming
 
 Streaming is a Rust-owned execution primitive. The execution order remains

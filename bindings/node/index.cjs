@@ -260,4 +260,126 @@ class LocalML {
   }
 }
 
-module.exports = { ...native, LocalML, NativeLoadError, diagnoseNative };
+class GenerationError extends Error {
+  constructor(message, code, options) {
+    super(message, options);
+    this.name = 'GenerationError';
+    this.code = code;
+  }
+}
+
+/** Native errors arrive as `[code] message`; surface the code as a property. */
+function toGenerationError(error) {
+  if (error instanceof GenerationError) return error;
+  const match = /^\[([a-z_]+)\] ([\s\S]*)$/.exec(error?.message ?? '');
+  return match
+    ? new GenerationError(match[2], match[1], { cause: error })
+    : new GenerationError(error?.message ?? String(error), 'native', { cause: error });
+}
+
+async function guarded(promise) {
+  try {
+    return await promise;
+  } catch (error) {
+    throw toGenerationError(error);
+  }
+}
+
+function requireRequest(request) {
+  if (!request || typeof request.model !== 'string' || request.model.trim() === '') {
+    throw new TypeError('chat requires an explicit request.model');
+  }
+  if (!Array.isArray(request.messages) || request.messages.length === 0) {
+    throw new TypeError('chat requires at least one message');
+  }
+}
+
+/** One in-flight generation stream; iterate it with `for await`. */
+class ChatStream {
+  #handle;
+  #started = false;
+
+  constructor(handle) {
+    this.#handle = handle;
+  }
+
+  /** Stops the request and releases the upstream connection. Idempotent. */
+  close() {
+    this.#handle.close();
+  }
+
+  cancel() {
+    this.close();
+  }
+
+  async *[Symbol.asyncIterator]() {
+    if (this.#started) throw new TypeError('a ChatStream can be iterated only once');
+    this.#started = true;
+    try {
+      for (;;) {
+        const raw = await guarded(this.#handle.next());
+        if (raw === null || raw === undefined) return;
+        yield JSON.parse(raw);
+      }
+    } finally {
+      // Runs on completion, error, and early `break`/`return()`.
+      this.#handle.close();
+    }
+  }
+}
+
+/**
+ * Generative inference against an explicitly configured OpenAI-compatible
+ * endpoint. All transport, parsing, validation, and credential handling is
+ * native; this class only exchanges JSON.
+ */
+class GenerativeML {
+  #client;
+
+  constructor(options) {
+    if (!options || typeof options.endpoint !== 'string') {
+      throw new TypeError('GenerativeML requires an explicit endpoint');
+    }
+    try {
+      this.#client = new native.GenerationClient(JSON.stringify(options));
+    } catch (error) {
+      throw toGenerationError(error);
+    }
+  }
+
+  static async create(options) {
+    return new GenerativeML(options);
+  }
+
+  async chat(request, { cancellation } = {}) {
+    requireRequest(request);
+    return JSON.parse(await guarded(this.#client.chatJson(JSON.stringify(request), cancellation)));
+  }
+
+  chatStream(request, { cancellation } = {}) {
+    requireRequest(request);
+    try {
+      return new ChatStream(this.#client.openChatStream(JSON.stringify(request), cancellation));
+    } catch (error) {
+      throw toGenerationError(error);
+    }
+  }
+
+  async listModels({ cancellation } = {}) {
+    return JSON.parse(await guarded(this.#client.listModelsJson(cancellation)));
+  }
+
+  // Never expose configuration (and so credentials) through inspection.
+  toJSON() {
+    return { type: 'GenerativeML' };
+  }
+}
+
+module.exports = {
+  ...native,
+  LocalML,
+  GenerativeML,
+  GenerationError,
+  NativeLoadError,
+  diagnoseNative,
+};

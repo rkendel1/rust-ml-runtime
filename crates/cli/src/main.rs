@@ -1,3 +1,5 @@
+mod chat;
+
 use clap::{Args, Parser, Subcommand};
 use ml_runtime::ml_runtime_inference::{
     ExecutionPolicy, InferenceOptions, InferenceRequest, InferenceStreamEvent, Input, Output,
@@ -81,6 +83,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Generative inference through an explicitly selected provider
+    Chat(chat::ChatArgs),
     Run(RunArgs),
     Bench(BenchArgs),
     Serve(ServeArgs),
@@ -894,6 +898,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                 }
+            }
+        }
+        Commands::Chat(args) => {
+            let code = chat::run(args).await;
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Commands::Bench(args) => {
